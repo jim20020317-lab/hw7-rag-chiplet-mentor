@@ -1,0 +1,6 @@
+faiss_db.zip
+rag-data.zip
+__pycache__/
+*.pyc
+make_*.py
+build_vector_db.py

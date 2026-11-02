@@ -1,0 +1,508 @@
+# DCIM 分割方法總目錄（給硬體工程師的查表手冊）
+
+> **文件目的**：把 7 篇本地論文（L1–L7）＋ 3 份網路方法卡（W1–W3）＋ 紅隊/查核意見（R1、R2）整合成「可直接查表」的 DCIM（SRAM-based digital compute-in-memory）分割方法目錄。
+> **對象**：正在設計 DCIM PE／macro／chiplet 的硬體工程師。
+> **層級鐵律（全文強制）**：任何一條記錄都必須標明它切的是哪一級，**嚴禁把「同一篇論文的 macro 內部 array 切法」與「跨 macro / tile / die 的切法」混為一談**。
+> 統一層級：`bitcell → array / subarray → macro → tile → die / chip → chiplet → package → wafer`。
+> **證據標記**：`[E]`＝原文有實驗/量測支持；`[T]`＝原文定理/公式/演算法複雜度；`[I]`＝跨論文推論，需驗證；`[未]`＝原文未提供。
+> **本版已套用 R1 紅隊與 R2 事實查核的修正**：見 §8「被更正的錯誤」。凡被 R2 標 `✘` 的數字（TriCIM 容量、PIMCOMP 約束、Wang toggle 上界、TIMELY 61% 歸屬）與 R1 標為誤導的規則（T2 `F1`、`B1`、`E3`）**均不照抄**。
+> **視覺複核（rule 1 執行紀錄）**：本檔作者以 `pymupdf`（dpi=160）重新 render 並**目視**下列關鍵圖表，非只讀 caption：FLARE Table II、TriCIM Table I＋三分區、Sun Fig.15/16、Sharma Table IV/V、Wang DBS Fig.4/5、INDM Fig.7/8、PolyCIM Fig.5/§3.4.2、FlexSpIM Fig.4。輸出檔在 `/tmp/final_figs/`。PolyCIM reuse 軸標定、FLARE ✓/✗ 矩陣、Sharma `Rp/Cp/Rh/Ch`、Sun 三種 floorplan 均由目視確認。
+
+---
+
+## 1. 一頁速覽：DCIM 分割的 10 條核心原則
+
+| # | 原則（硬體機制，不是口號） | 出處（檔名＋頁/圖/表） |
+|---|---|---|
+| P1 | **容量決定 regime，不是切割技巧決定**。`C_CIM ≥ W_model` → model-stationary（無 runtime weight update）；`W_model > C_CIM ≥ W_layer` → layer-stationary；`C_CIM < W_layer` → tile-stationary。regime 一跳出去，weight reload 就變成不可與 compute 重疊的一級成本。 | TriCIM（L1）Table I/Fig.3，p.2189；TriCIM PDF p.5（目視）；model-stationary 相對 CiMLoop 2.8–13.2× speedup、16.2–86.7× energy（L1 p.2197） |
+| P2 | **切哪個軸決定代價落點**（零和交換，三者不可兼得）：切 `N`（output channel）⇒ **activation broadcast / all-gather、無 reduction**；切 `M`（spatial）⇒ **weight replication、無 reduction**；切 `K`（contraction）⇒ **output reduction、不複製 activation**。 | FLARE Table II（W3 p.505；**本檔目視確認**：Row-wise ✗/✗/✓、Column-wise ✗/✓/✗、Sequence ✓/✗/✗）；INDM（L7）Fig.2/Fig.5，p.1110/1112 |
+| P3 | **reduction 只能吸到 array 的 columnwise adder tree 扇入深度**。in-situ 上限＝等效 MAC row 數 `R`：Sun2024 `R=144`；Sharma Digital-6T `Rp=256`、Analog-6T/8T `Rp=64`、Digital-8T `Rp=1`。超過就必須 fold，partial sum 走 accumulator buffer。 | Sun（L2）p.1193；Sharma（L3）Table IV p.1222（**本檔目視確認**）；Sharma Table V p.1222 |
+| P4 | **fold 公式必須含 hold factor**：`FR = ceil(K / (Rp·R_M))`、`FC = ceil(N / (Cp·C_M))`，週期成本再乘 `Rh`/`Ch`。Analog-6T `Cp=4, Ch=16`；Digital-8T `Rp=1, Ch=1, Rh=10`；**Sun2024 的 `Rh=Ch=1` 是特例**。 | Sharma（L3）Table IV p.1222；Sun（L2）Eq.(5)(6) p.1193；R1 §OG-4 |
+| P5 | **跨 die 切 `K`（收縮維）是最後手段，不是絕對禁忌，但代價有量級差**：跨 die 1 bit ≈ 49 個 8-bit MAC 的能量（e_GRS 1.17 pJ/bit vs e_MAC 0.024 pJ per 8-bit MAC）；且 psum 位寬遠大於 W/A（INDM 24-bit、Sun 36-bit accumulator）。Corsair 的 TP+AllReduce 證明技术上可做。 | INDM（L7）Table III p.1111（**R2 修正單位**：0.024 是 per 8-bit MAC）；L7 p.1115；Corsair（W3）p.32；TEMP（W3 §3）；R1 §OG-6 |
+| P6 | **DCIM 的成本主導項是「array 啟動次數 / ADC convert 次數 / buffer access / weight reprogram 事件」，不是 bytes**。DCIM 專屬刀口：1-bit weight 需 array programming、同 macro 內不可與 compute 平行；1-bit activation 走 streaming、可 multicast/overlap。 | Sun（L2）Fig.4 p.1194（CIM macro 14%、weight buffer 2%、activation buffer 38%、accumulator buffer 32%）；TriCIM（L1）§V-B p.2193（最小 reload 粒度＝整個 CIM tile、full-matrix、無 partial update）；W3 §4.3 |
+| P7 | **weight 處置四分：stationary / replication / slicing / reload**。複製只在「有空閒硬體」或「切了 M/B 使每顆 die 需完整 weight」時合理；PolyCIM 把 weight-reuse 軸排在**最後**優先序。 | PolyCIM（W2 B2）§3.4.2（**本檔目視確認**原文：「It first maps output-reuse axes…Finally, weight-reuse axes enable weight replication and are considered only when sufficient storage capacity is available」）；ISAAC（W1 A4）；CIMFlow（W2 B1） |
+| P8 | **能放 array 就別上 macro、能放 macro 就別上 tile、能放 tile 就別上 die**——每上一級都引入新的 reduction 或 buffer/頻寬成本。同一效果（擴展到 4 macro）有 partition 與 multicast 兩種實作，選錯會掉進 memory-bound。 | Sun（L2）Fig.15（**本檔目視確認**：4×1＝144b→4×36b partition＋2-stage FAN＋buffer BW 4×；1×4＝36b multicast＋bypass 整棵＋buffer BW 1×）；Fig.16（util ~2.96×、EDP 0.34×）；C7 |
+| P9 | **切割必須逐 layer 可變、且跨層用全域 DP**（不可逐層貪心）。同一 ResNet-18 內 Layer1 全切 P（spatial）、Layer7/10/14 全切 output channel；層界通訊型態（halo unicast / all-gather）是 DP 的狀態轉移成本。 | INDM（L7）Table VII p.1117（**本檔目視確認** Fig.8 的 P/PK/K-Parallel 與 unicast/all-gather/scatter）；L7 Eq.(5) p.1112（`O(M^L)→O(L·M²)`）；EDP −41.54%~96.15% |
+| P10 | **精度與稀疏度會改變「有效 K 與有效 tile 數」**：bit-serial 週期 `n_cyc=ceil(A_bits/s_bits)`；Sparsity ρ 使有效 K 折減、整條 K 段被 skip 才省得到 adder tree；mixed precision 可釋放 tile 去複製（LRMP）。 | Sun（L2）Table IV p.1197（8 cyc/8-bit MAC）；L5（Wang）§III.A/Fig.16/25（patch skip 0.005–0.25）；W2 D4 LRMP；W3 H3D SADEF/PAQM |
+
+---
+
+## 2. 分割軸完整清單（partition axis catalogue）
+
+> 分三類避免混淆：**A 類（邏輯/張量軸，真正切資料）**、**B 類（配置軸，切硬體資源）**、**C 類（後果軸，描述切完代價落點）**。每個軸寫「切了會發生什麼／什麼時候該切／陷阱」。
+
+### A 類：邏輯 / 張量軸
+
+#### AX-N（output channel / `C_OUT` / `dout`）
+- **切了會發生什麼**：每個 compute 單元只需自己那份 output-channel weight → **weight 不複製、不重載**；代價轉到 **activation broadcast / all-gather**。切 N 是**輸出維，不產生跨分割 reduction**。
+- **什麼時候該切**：單層放不下、又不想付 reduction 時的第一刀。INDM 的 K-Parallel（K＝輸出通道）把 weight 分散、activation 用 (3/4)·P·Q·K 的 all-gather；FLARE Column-wise（Broadcast ✓ / Reduction ✗）。
+- **陷阱**：activation all-gather 打在本已最大的 activation buffer 能量項（Sun activation buffer 38%）。不要把它跟 activation 複製（= 每份都要一份完整 activation）混淆；broadcast/multicast（源 1×、sink D×）比落地複製便宜。[E] L7 p.1112/Fig.5；W3 FLARE Table II；L2 Fig.4
+
+#### AX-K（contraction / input channel / `N_WPF`）
+- **切了會發生什麼**：**必產生第二級 reduction**。in-situ 只能吃 `≤R`；超出後跨 fold 的 partial sum 走 accumulator buffer（每 fold 1R+1A+1W），跨 macro 走 channel accumulator / FAN adder tree，跨 die 走 AllReduce。切 K 通常 weight 不複製。
+- **什麼時候該切**：**只在 die 內、且 N/M 都切不動（容量或利用率）時**。作為 `K > R_insitu` 時的 fold 手段是必要的（P3）；作為跨 die 的切法則是最後手段（P5）。
+- **陷阱**：① 把「K 一定映到 rows」當通則——PolyCIM 的 macro 是 row-wise input broadcasting + column-wise output accumulation，收斂軸映到 columns，fold 應是 `FC=ceil(K/C)`（R1 §OG-9）。② 以為跨 die 切 K「反正有 NoC」——deadlock 與 24-bit psum 流量是結構性成本。[E] L2 Eq.(5)(14)；L3 Table IV/V；L5 channel accumulator；W2 PolyCIM §3.4.1；R1 §OG-9
+
+#### AX-M（spatial / output pixel `P/Q` / `OH·OW`）
+- **切了會發生什麼**：不同 output pixel 不互相加 → **不產生 output reduction**；代價是**每個 die 需完整 weight（weight replication）**＋conv 層界 **halo（S−1 欄）unicast**。
+- **什麼時候該切**：activation size 夠大、spatial 平行度能被吃滿時優先。INDM P/Q-Parallel weight multicast；FLARE Row-wise 其實切的是 `din`（收縮）並只做 output reduction，**不是純 M**——兩者要分清。
+- **陷阱**：① 對 attention 層，sequence 軸同時是 query row（M）與 `QK^T`/softmax 的收斂維（K），切它會引入 row-wise reduction（HiRe softmax horizontal sync、Zexin INR）。② spatial 切太細 → 小 activation 層利用率崩（INDM「P-Parallel may not be optimal for layers with a small activation size」）。[E] L7 p.1110/Fig.10(a)；L4 §II.B/V-B；W3 FLARE Table II；R1 §OG-3
+
+#### AX-B（batch / token / sequence / timestep）
+- **切了會發生什麼**：由構造**不產生 reduction**（樣本獨立）；**weight 複製到每個分割**；sequence 切塊有 cross-block 依賴（softmax row 依賴、FlashAttention 式 local softmax + global normalization）。
+- **什麼時候該切**：**吞吐擴展最便宜的軸**；HiRe 對 DNN 用 data-parallel weak scaling。batch 也可攤銷 weight reload（TriCIM batch 1→16，相對改善 1.06×→1.29×）。
+- **陷阱**：sequence 切塊的依賴會限制 pipeline 深度；LLM 的 KV cache 使「切 sequence」同時要決定 KV 駐留（見 AX-KV）。[E] W3 FLARE Table II（Sequence: Replication ✓）；L7 HiRe p.1739；L1 Fig.16；L4 §VI-B
+
+#### AX-BIT（weight bit / activation bit / block-FP exponent）
+- **切了會發生什麼**：有兩種正交實作——**spatial（沿 column 展開）**：更多 column/ADC converts，跨 bit-slice 用 shift-and-add；**temporal（沿 cycle 展開）**：accumulator＋shift-add、DAC 可簡化為 1-bit，latency × bit 數。
+- **什麼時候該切**：單一 cell 精度不足（ISAAC `16/w` 個 w-bit cell）、或要把「一次能吃的 K」換成「多 cycle shift-add」以避開跨 die reduction。block-FP 用共享 exponent 攤銷（Wang `INCIM=16`，精度 −0.86%）。
+- **陷阱**：① 忽略 bit-serial 週期放大（8-bit activation、s=1 → 8 cycles；partition 成本函式不含 `n_cyc` 會嚴重低估 K fold）。② 把非分割技巧（RAELLA center+offset 平移、Wang low-toggle 數值重分群、MDM row 排序）誤列為 bit 分割。[E] W1 A3/A4/A5/A7/A9/A10；L2 Table IV p.1197；L5 §II.A/Fig.6；L3 p.1222；R1 §3.2-3
+
+#### AX-LAYER（layer / operator / subtask / stage）
+- **切了會發生什麼**：以 layer/operator 為最小單位 → **由構造無跨 die reduction**；layer 邊界需 weight reload/reprogram；層間傳 activation。
+- **什麼時候該切**：**只要單層 footprint 放得進單 die，首選切 layer**（跨 die 的安全預設）。SIAM 明文「DNN layer 不可跨 chiplet 切」。
+- **陷阱**：layer-stationary 的群間重載粒度是**整個 CIM tile、full-matrix、無 partial update**，且同 macro 內不可與 compute 重疊；必須用 ping-pong/overlapped reload 排程。[E] W3 SIAM §2.2；L1 §V-B p.2193；W3 §4.2
+
+#### AX-MODEL（model / regime）
+- **切了會發生什麼**：不切單一 tensor，而決定「哪些層權重常駐 on-chip」。model-stationary → 無 runtime reload；layer-/tile-stationary → 有 runtime reload。
+- **什麼時候該切**：**第一步就該先判定**（P1 根節點）。同一模型在 ISAAC-Large(504MB) 落 model、ISAAC-Medium(63MB) 落 layer、AdaPIM(0.72MB) 落 tile。
+- **陷阱**：用整塊 array 容量當 `C_CIM` 會誤判——必須扣掉 activation/KV/psum 佔用與 memory-mode 保留（見 AX-MODE）。[E] L1 Table I/Fig.3/Fig.11；R1 §OG-5
+
+#### AX-SP — sparsity-aware partitioning（★R1 新增，T1/T2 原缺）
+- **切了會發生什麼**：稀疏度改變**有效 K 與有效 tile 數**。若要真省 adder tree 能量，**skip 粒度必須＝array 的一整條 K 段**，否則 adder tree 仍全開。
+- **什麼時候該切**：activation 稀疏度高時。Wang DBS-H「patch-channel skip」以 `patch = OUTCIM×INCIM` 為粒度整 patch/整 channel 跳過；FlexSpIM 輸入稀疏 85–99% 下省 87–90% 能量；H3D-LLM SADEF 用動態 1-bit mask；TensorCIM SpG 重排/重分割使 gathering 走本機 DRAM。
+- **陷阱**：`FR=ceil(K/R)` 不含 ρ，對 >80% 稀疏層會**高估 fold 與 accumulator 交易**。patch skip rate 在 ViT-B 僅 0.005–0.02、EViT 最高 ~0.25——**稀疏度低時 skip 幾乎無效**；LA(ReLU) 稀疏度 >80% 才有高 skip 機會。[E] L5 §III.B.3 p.8/Fig.16/25；L6 §III.B Fig.7(c)(d)；W3 卡#14；W3-10 Fig.16.4.3
+
+#### AX-PREC — precision-elastic partitioning（★R1 新增）
+- **切了會發生什麼**：精度是可切的 tile 變數。LRMP 決策變數＝每層 replication factor `r_l` ＋ 每層 mixed-precision `s_l`，LP 約束 `Σ r_l·s_l ≤ N_tiles`；**降精度是為了釋放 tile 去複製**。H3D PAQM channel-level mixed precision（DCIM INT8、ACIM INT4、BF16 outlier）。
+- **什麼時候該切**：tile 預算不足、且某些層對精度不敏感時。
+- **陷阱**：精度不對稱會改變 cell 佔用與等效 MAC 數（Sun IS 下 16-bit activation 佔 16 cells → 等效 MAC 砍半）。[E] W2 D4 LRMP Eq.7/8；W3 卡#14；L2 p.1198；R1 §1.2
+
+#### AX-KV / dynamic-weight（★R1 新增，T1/T2 僅一行帶過）
+- **切了會發生什麼**：KV cache 與 dynamic weight 的分割與駐留。dynamic weight 不能與 static weight 共用同一份 array（需兩份 array 或 ping-pong rotation）。
+- **什麼時候該切**：LLM/attention 為目標時必問：「KV 放哪一級、幾層、是否常駐、如何隨 sequence block 遷移」。
+- **陷阱**：FLARE Parallel Mode 保留所有 tensor（含 KV cache）vs Pipelined Mode（transient）；H3D SATS 用 correlation-scored tiered KV cache；TriCIM pipeline mode 給 K/V 各兩組 CIM array（一組算、一組存下一輪）；Wang DBS-F 固定 256 tokens。**「KV cache 在 CIM 上」是與 compute 無關的 capacity 決策**。[E] W3-1 p.504–505；W3 卡#14；L1 §VI-B/§VIII-C p.2195–2199；L5 §III.A/Fig.13；R1 §1.3/§1.4
+
+### B 類：配置軸（切硬體）
+
+#### AX-HW（macro 幾何 / cluster 粒度 / buffer 配比 / tile 預算）
+- **切了會發生什麼**：調 `R×C`、`N_core/N_macro`、`L1base`/`ratioL1_W:A:O`/`ratioL2`、cluster 尺寸、gear macro。`R↓`→accumulator 交易↑、energy↑；`C↑`→IS 的 `ceil(N_OF/C)` weight reload↓；buffer 中 weight 佔比↑→reload↓但可容 activation tile↓→spatial 切更細、halo↑。
+- **什麼時候該切**：固定容量下的 PPA 取捨。Sun 固定 2304 MAC 可 retile 144×16 / 72×32 / 36×64 / 18×128 / 9×256；**36×64 平均利用率最高、72×32 平均 EDP 最低（workload 相依）**。SynDCIM 在 timing 不足時把 column `H→H/2`（timing-driven fallback，非效能導向）。
+- **陷阱**：把幾何結論當通則——EDP/util 最佳點高度 workload 相依。[E] L2 Fig.13 p.1198–99；L7 INDM Table V p.1117；L7 HiRe §III-A；W2 SynDCIM §III-C；W3 AIG-CIM；R1 §OG-10
+
+#### AX-OP（operand-role stationarity：WS / IS / OS）
+- **切了會發生什麼**：決定「哪個 operand 留在 CIM array、哪個被串流」。WS（weight-stationary）、IS（input-stationary）、OS（output/membrane-potential stationary）。**stationarity 是資料流選擇，不是 DCIM 的物理天性**。
+- **什麼時候該切**：DW-CONV / `C_IN` 小 → 選 IS（columns 對 output pixel，16/16 columns 全開），否則 WS 下 15/16 columns idle；per-layer 可換（FlexSpIM 為 SNN 用 WS/OS hybrid）。
+- **陷阱**：① 認為「DCIM 天生 weight-stationary」——Wang DBS 是 input-stationary + weight-bit-serial；FlexSpIM per-layer WS/OS。② dataflow 切換有硬體成本（Sun ~0.12% macro 面積）與精度不對稱代價。[E] L2 p.1194/1198/Table V/Fig.12；L6 §II；L5 Table I；R1 §OG-8
+
+### C 類：後果軸
+
+#### AX-ST（spatial vs temporal，meta-axis）
+- **切了會發生什麼**：幾乎每個 A 類軸都可選 spatial（同時並行、更多硬體/資料複製）或 temporal（同一硬體分時、需 accumulator/序列化）。
+- **什麼時候該切**：ISAAC 明言「若晶片上有一半 IMA 未使用，就複製所有權重、吞吐約翻倍」——**只有空閒硬體才值得 spatial 複製**。[E] W1 A4/A9；L2 Fig.15；L6 §II
+
+#### AX-RED（reduction 收斂點）
+- **切了會發生什麼**：決定 partial sum 在哪一級收斂。層級由低到高：`array in-situ adder tree → macro accumulator buffer → tile FAN adder tree → NoC in-network reduction → die global accumulator → 跨 die AllReduce → 退回 DRAM`。
+- **什麼時候該切**：**永遠優先選最低可行層級**（P3/P8）。跨 die reduction 的替代只有三種：不切收縮維 / reduction 結果 reuse 留 CIM（TensorCIM REGM）/ 顯式 AllReduce（Corsair）。
+- **陷阱**：退回 DRAM 是最差選項，未見任何論文主張。跨 die reduction 的硬體機制多半「原文未提供」（FLARE row/2D/3D 標 Output Reduction ✓ 但機制未描述）。[E] L2 Eq.(14)/Fig.15；L3 Table V；L4 INR §V-B；W3 TensorCIM/Corsair；W3 §5-2
+
+#### AX-W（weight 處置）
+- **切了會發生什麼**：stationary（不重載）/ replication（multicast）/ slicing（分散）/ reload（reprogram）。與 activation 處置是零和交換。
+- **什麼時候該切**：判準不是 bytes，而是「此 operand 是否需 reprogram CIM array」。DCIM 的 1-bit weight reprogram 成本 ≫ 1-bit activation streaming，且不可與 compute 重疊。[E]/[I] W3 §4.3；L2 p.1197（>4MB → DRAM double-buffer）；L1 §V-B
+
+#### AX-AB（activation 處置）
+- **切了會發生什麼**：broadcast（multicast，源 1×、sink D×）/ all-gather / streaming（unicast/halo）。
+- **什麼時候該切**：切 N 時必須 broadcast/all-gather；切 M 時只需 halo unicast（conv 層界 S−1 欄）。multicast 優於落地複製。[E] L7 p.1112/Fig.10(a)；W3 FLARE Table II
+
+#### AX-MODE（dual-mode：compute vs memory，★R1 新增）
+- **切了會發生什麼**：每個 CIM array 可為 compute(`λ_c`)/memory-input(`λ_min`)/memory-output(`λ_mout`)，`2^m` 種模式；成本顯式含 mode-switch latency `L_{M→C}, L_{C→M}`、write-back、weight rewrite。
+- **什麼時候該切**：LLM 推論時「compute to memory ratio in CIM arrays about 10%」→ 寧可提供更多 on-chip random memory 放 activation 與 KV cache。
+- **陷阱**：把整塊 array 容量都當 compute 容量會誤判 regime（見 P1 陷阱）。[E] W2 C2 CMSwitch Eq.1–3；webtext/2502.17006v1；R1 §1.3
+
+#### AX-REC（runtime reconfiguration / shape-switch 成本，★R1 新增）
+- **切了會發生什麼**：動態重構鏈路/形狀的成本。Sun FDN/FAN 每 workload 一次重配置（面積 ~6% macro、energy <1%），但 4×1 vs 1×4 的 buffer BW 差 4×；HiRe RN reconfigure 無壅塞時 1 cycle 完成 4 步、但可連範圍受限（X/Y 差 ≤1）；FlexSpIM NR/NC 由 2-bit control bitcell 在 runtime 設定。
+- **什麼時候該切**：形狀切換頻率 × switch 成本 < 靜態 mapping 損失時，動態重構；**權重「搬家」成本 > 鏈路/形狀重構成本時，改重構鏈路不搬 weight**（HiRe 原則）。[E] L2 p.1200/Fig.17；L7 §III-B p.1741；L6 §II；L5 Fig.5 p.3；R1 §1.5
+
+---
+
+## 3. 方法總表
+
+> 欄位：**方法名 / 層級 / 切哪個軸 / 硬體限制 / reduction 位置 / weight 是否重載 / 量化結果 / 出處**。
+> 「出處」欄的 `L#`＝本地論文卡；URL/DOI 見 §7。`原文未提供`＝該欄位文獻無此資訊。**層級欄嚴格區分 intra-macro 與跨 macro/die。**
+
+### 3A. array / subarray / bitcell 級（intra-macro）
+
+| 方法名 | 層級 | 切哪個軸 | 硬體限制 | reduction 位置 | weight 重載 | 量化結果 | 出處 |
+|---|---|---|---|---|---|---|---|
+| Sharma WWW-CiM WS K×N mapping | array | AX-K→row、AX-N→col | `Rp/Cp`（Table IV） | array columnwise＋output buffer | 不複製；footprint>容量才 reload | K sweet spot 256；>512 plateau ~1.75 TOPS/W | L3 p.1220–22/Table IV |
+| Sharma hold-factor serialization | array | AX-K/AX-N 殘餘 | `Rh/Ch`（Analog Ch=16；Digital-8T Rh=10） | unit 內序列＋output buffer | 不複製 | latency 9–233 ns | L3 Table IV p.1222 |
+| Sharma in-situ K + spillover | array | AX-K chunk ≤ Rp | `Rp`＝in-situ 上限 | array 內；超出寫回 main mem | 不複製 | K>Rp → partial-sum spillover | L3 Table V p.1222 |
+| Sun WS mapping | macro（intra） | K→row、N→col、M→temporal | R=144；bit-serial 8 cycle | array adder tree→跨 rowfold 用 AccB | stationary；layer 間重載 | WS baseline；DW-CONV util 9.4% | L2 Table III/Fig.5–6 |
+| Sun IS mapping | macro（intra） | K→row、M→col、N→temporal | R=144 | 同上（式14 共用） | weight 重載 `ceil(N_OF/C)` 次 | workload util 2.3–4.9×；EDP 0.4× | L2 p.1198–99 |
+| Sun RowFold | array→macro | AX-K | R=144；每 fold AccB 1R+1A+1W | macro AccB | weight 不重載 | R↓→energy↑ | L2 Eq.(5)(14) |
+| Sun MacroDimRetile | macro/array | AX-HW（R×C） | R×C=2304 const | AccB 交易量隨 R | C↑→IS weight reload↓ | 36×64 max util；72×32 min EDP | L2 Fig.13 |
+| Sun PrecisionMapping | array/bit | AX-BIT | 8/12/16b W/A | 不變 | cell 佔用改變等效 MAC | EDP 0.4–0.57× | L2 p.1198–99 |
+| ISAAC A2 subarray split | **array**（IMA 內） | AX-K(列)＋AX-N(行) | 實體 128×128；ADC `A=log(R)+v+w` | IMA OR（shift-add） | 不複製 | 256×256→4×128×128 | W1 ISAAC p.6 |
+| ISAAC A3 weight bit-slice | bitcell/subarray | AX-BIT(weight) spatial | cell 精度；ADC | IMA OR | 不複製 | 16/w cells（w=2） | W1 ISAAC p.5–6 |
+| ISAAC A4 input bit-serial＋雙 IMA | bitcell/array | AX-BIT(act) temporal | 1-bit DAC | IMA OR | **複製（MSB/LSB 兩 IMA）** | latency 減半、storage 加倍 | W1 ISAAC p.5 |
+| PUMA bit-slice bank | subarray/array | AX-BIT(W+act) | cell 2-bit；周邊 10×；ADC reuse | MVMU→VFU | 配置期載入；執行期不重載 | 8 crossbar/MVM | W1 PUMA §3.2 |
+| RAELLA adaptive slicing | subarray | AX-BIT(weight) spatial | ADC 能量第一因子 | 數位 shift-add | 編譯期前處理 | Convert/MAC=in×w slices | W1 RAELLA §3.2 |
+| RAELLA center+offset | subarray/column | 不移維（平移分佈） | ADC 解析度 | column 內類比抵消 | 不重載 | ≤7-bit 佔比 82.1% | W1 RAELLA §3.1 |
+| RAELLA dynamic input slicing | array | AX-BIT(act) runtime | ADC 飽和 | 數位 shift-add | 不涉及 | 投機/回復 | W1 RAELLA §3.3 |
+| CASCADE R-Mapping | subarray＋**buffer array** | AX-BIT(weight)＋psum 對齊 | BL 解析度；ADC/TIA | **buffer 內類比累加** | weight 不重載；buffer 寫 psum | 省 7.59× 能量 | W1 CASCADE p.5–7 |
+| PICO-RAM slice mapping | bitcell→slice→MVM group | AX-BIT(weight 4 slices)＋input | ADC 15→8.5b；電容匹配 | slice MAC Line→P-Sum Combiner→TD-ADC | 不重載；非作用 cell 存他層 | CIFAR-10 91.0% vs 軟體 91.4% | W1 PICO-RAM |
+| TIMELY O²IR | subarray/sub-Chip | filter 位移複製(Z×S)＋input 時移 | A/D 能量；γ 共用 | time-domain I-adder/ALB | **weight duplication**；layer-by-layer | 8-bit→兩相鄰 bit-cell column | W1 TIMELY §D（**R2 修正**：61% A/D 是 ISAAC 數字，非 TIMELY） |
+| Wang DBS-A macro 2D 映射 | array/local group | in-ch→row、out-ch→col | 8×8 local group；two-way SRAM | local adder tree | 不複製 | — | L5 Fig.4 p.3（**目視**） |
+| Wang DBS-B dual-bit stream | array（bit,時間） | AX-BIT(weight) temporal（2-bit） | 4:1 MUX LUT；cycle acc；toggle | cycle accumulator | 每 cycle 讀 2-bit | toggle 降 **25.5–29.2%**（R2 修正） | L5 p.3–5/Fig.10 |
+| Wang DBS-C LUT sharing | macro | activation 廣播（AX-OP） | LUT 共用；adder 深度 | local adder tree→block-FP | 不複製（activation 不佔 per-cell） | 省 59.9% layer energy | L5 p.4/11/Fig.6 |
+| Wang DBS-D tile fold | array/local group | AX-K＋AX-N 可調 | `K_V0+K_H0=7`（8×8-bit） | local adder tree | fold 改佈局 | — | L5 Fig.5 p.3（**目視**） |
+| FlexSpIM operand shaping | array | AX-BIT；隱含 AX-N（neuron） | 512×256 16kB；PC 1×256 | **PC 1-bit adder＋column carry 鏈（無 adder tree）** | weight 存 array；OS 層每 timestep 重載 | 省 4.3× 能量 | L6 §II/Fig.2 |
+| FlexSpIM per-layer HS | macro | AX-OP（WS/OS） | unified weight/pot memory；16kB | membrane potential（OS）或寫回 buffer | OS 每 timestep 重載整層 weight | HS-min 23.4kB vs WS-only 69.8kB；+46% | L6 Fig.4（**目視**） |
+| SynDCIM column split | array | AX-HW（timing fallback） | critical path | column adder tree→OFU | 不涉及 | — | W2 B4 §III-C |
+| CiMLoop per-macro restriction | array（macro 內） | operand bit→array 位置 | ADC 能量；analog adder/acc | array 內（依 macro 種類） | weight-stationary 則不重載 | ResNet18 三 column 共用 output 利用率最高 | W2 A2 Fig.3 p.4–5 |
+
+### 3B. macro / tile 級（intra-die，多 macro）
+
+| 方法名 | 層級 | 切哪個軸 | 硬體限制 | reduction 位置 | weight 重載 | 量化結果 | 出處 |
+|---|---|---|---|---|---|---|---|
+| Sun ReconfigMultimacro | **tile** | AX-K（垂直 R_M）＋AX-N/M（水平 C_M） | FDN/FAN；buffer 144b@1.04GHz | **tile 級 FAN 2-stage adder tree（可 bypass 第2級/整棵）** | 4×1 不複製；2×2 複製2份；1×4 複製4份 | util ~2.96×、EDP 0.34× | L2 Fig.14–16（**目視**） |
+| Sun ScaleOut | tile | AX-K / broadcast | SRAM buffer BW 為主限制 | FAN | 1×4 multicast | DeepLabV3+ EDP 0.2×、60FPS | L2 Fig.17–18 |
+| Sun BufferPartition | **buffer** | activation buffer 對半 | AB 8MB | 無 | 無 | PPA 假設，非優化 | L2 Eq.(18)(21) |
+| Wang DBS-E cross-macro V×H | **跨 macro** | AX-K（V）＋AX-N（H） | INCIM=OUTCIM=16 | **channel accumulator** | 不複製；LP-1 weight reuse | 557.5 TOPS/W | L5 Fig.5（**目視**） |
+| Wang DBS-F ping-pong rotation | CIM group/時間 | block / SMM-DMM 任務 | RRAM write 貴、endurance | 無跨 group reduction | dynamic weight 每 block SRAM 重載 | 面積 −64.77%；density 2.13× | L5 p.6–7/Fig.13 |
+| Wang DBS-G weight redistribution | macro/local group | weight 儲存位置 | 需同維度；獨立 input ports | 不變 | static weight reshuffle | max 2.8× speedup | L5 p.7–8 |
+| Wang DBS-H patch-channel skip | macro/patch | **AX-SP**（patch=OUTCIM×INCIM） | mask gen；sparsity | 跳過者不產生 | dynamic weight by SRAM write | patch skip 0.005–0.25 | L5 p.8/Fig.16/25 |
+| Wang DBS-I block-FP | macro input | AX-BIT(exponent) | block=16；adder 寬度 | local＋shift/adder | 否 | 精度 −0.86% | L5 p.4/8/Fig.6 |
+| Wang DBS-J low-toggle | 演算法（**非分割**） | weight 數值 | toggle 分佈 | 不變 | 不改結構 | toggle −25.5~29.2% | L5 p.6–7（R2 修正） |
+| Sharma multi-primitive K vs N | macro | AX-K 或 AX-N | primitive 數（4）；`K:N<4` | output buffer/上層 | 不複製 | K:N=64 vs 4 | L3 p.1220–21 |
+| Sharma hierarchical tiling | cache memory level | AX-M 往高容量層放 | RF 4×4KB、SMEM 256KB | 較高 memory level | 容量大→weight tile 大 | SMEM configB 10× RF | L3 §VI-C p.1226 |
+| FlexSpIM multi-macro layer map | macro（跨 macro） | AX-LAYER＋NR×NC | ≥2 macro 才 full HS；32–256b merge-shift | 各 macro 內 | 不複製 | stationary +46% | L6 Fig.4 |
+| Zexin sequence blocking | operator/sequence | AX-B（factor 4） | Softmax row 依賴 | 各自 CIM PE | 否 | HD 1.82×/1.46× | L4 §VI-B（**註**：此為 X-Former baseline，非本文貢獻） |
+| Zexin computation granularity | array→macro（PE 內 array 數） | AX-HW（1×1/2×2） | array 128×128(ACIM)/128×256(DCIM) | PE 內 columnwise→INR | duplication factor 預定義 | — | L4 Table I |
+| Zexin cross-type weight dup | macro/PE | AX-M（activation rows） | ACIM:DCIM=3:1；DCIM PE 大 2.95–5.42× | **不跨組 reduce（M 切的好處）** | **weight duplication，row-by-row** | HD 1.93×/1.56% | L4 §III.A/IV.B |
+| PolyCIM multi-macro mapping | array→tile | **優先序：output-reuse(＝K)→input-reuse(＝N)→non-reuse→weight-reuse(＝M)** | `R×C`；容量 | macro column accumulate；跨 macro 於記憶體 | weight 複製僅容量足時、排序最後 | pre-tiling off 慢 6.2× | W2 B2 §3.4.2（**目視**） |
+| CIM-Tuner NR/R×IP/WP×AF/PF | accelerator＋macro | AX-OP＋AX-M/AX-K tiling | SCR、IS/OS size、BW | AF→output acc；PF→output SRAM | NR/R、IP/WP 決定更新 | 1.58×/2.11× | W2 B3 |
+| CIMFlow CG partition+dup | die/core＋macro | AX-LAYER/AX-HW | SRAM 容量低 | core 內 macro | 跨 core duplication | 2.8×/61.7% energy↓ | W2 B1 |
+| CIM-MLC multi-level | die→crossbar→row | AX-LAYER/AX-HW（CG/MVM/VVM） | core#/xb#/parallel row/L0 BW | crossbar row 內→跨 row | operator duplication | MVM pipeline 降 peak power ~30% | W2 C1 |
+| PIMCOMP AG+unfolding | macro/core | weight vertical AG；unfolding (H,W,P) | `HWP=IOK²`、**禁止 `O\|H`**（R2 修正） | 跨 AG 在 replica 內 | GA 決定 replication factor | HT 3.3×；LL 5.4–21.8× | W2 C4 |
+| NicePIM PIM-Mapper | DRAM-PIM node | AX-B/P/Q/K/C | node array、buffer、DRAM CAP | node region 內 | WR 控制複製；不足靠 NoC 共享 | — | W2 C5 |
+| ISAAC A1 layer-to-tile | **tile/IMA（跨 macro）** | AX-LAYER | 16 tiles/chip；eDRAM | 層間 eDRAM | 推論不重載；pipeline 平衡時複製 | — | W1 ISAAC p.4 |
+| PUMA A6 graph partition | array/tile | weight matrix 2D tile | shared mem、FIFO | shared memory 聚合 | 配置期載入 | — | W1 PUMA §5.2 |
+| PipeLayer Morp/Mem+G | subarray | 功能區＋submatrix 2D | array 尺寸 | 水平收集＋垂直數位相加 | **G 控制複製度** | — | W1 PipeLayer |
+| AIG-CIM tri-gear P/B/E | macro/tile | AX-LAYER→gear macro | storage:compute=128/32/8 | macro 內 adder tree＋shift-acc | 依層切片、非複製 | 21.3× latency | W3 AIG-CIM Fig.4 |
+| Hemlet GLP | array/group | 多層 weight column 交錯 | ADC 時分多工 | subarray ADC | 不複製（每層一份） | 2.53×（energy +4.62%） | W2 D1／W3-2 |
+| LRMP layer replication | tile 陣列（跨 tile） | AX-PREC（複製＋精度） | `Σ r_l·s_l ≤ N_tiles` | 各 tile | **replication 由 LP 決定** | — | W2 D4 |
+
+### 3C. die / chiplet / package（＋ wafer 對照）
+
+| 方法名 | 層級 | 切哪個軸 | 硬體限制 | reduction 位置 | weight 重載 | 量化結果 | 出處 |
+|---|---|---|---|---|---|---|---|
+| TriCIM CIM-capacity regime（三分區） | chip/die | AX-MODEL | `C_CIM`（63MB→0.5625MB，**R2 修正**） | 不直接切 tensor | model-stationary 無；layer/tile 有 reload | 1.1×–13.2× | L1 Table I/Fig.3/Fig.11 |
+| TriCIM layer grouping | chip/tile | AX-LAYER | 群內 weight 和 ≤ `C_CIM` | 不涉及 | 群間 full-tile reload、可 overlapped | latency −46.0% | L1 §V-A/Eq.(3)–(7)/Table II |
+| TriCIM CIM-aware tiling | macro/array | AX-K/AX-N sub-tile | `{t_*} ≤ {p_*}` | macro 內 Psum buffer | 每 tile 重載 | — | L1 §VI-A/Fig.9 |
+| INDM P/Q/K 7-parallel | package/chiplet/PE | AX-N（P/Q/K_out）；**AX-K 不切** | die ≤3mm²；interdie 1.17 pJ/bit；24-bit psum | **只在 PE 內**（明示跨 PE/die 不累加） | P/Q 切→weight 複製；K 切→weight 分散、activation 複製 | EDP −41.54~96.15% | L7 Fig.4/5/8/9、p.1109 |
+| INDM cross-layer DP | package | 逐層選切法（AX-LAYER） | EDP model 誤差 2.23% | 不涉及 | 由所選切法 | EDP −41.54~96.15%；`O(L·M²)` | L7 Eq.(5)/Alg.1 |
+| INDM mem-hier partition | die/chiplet | AX-HW（buffer 配比） | die 3mm² | 不涉及 | `ratioL1_W` 決定重載頻率 | 面積 penalty 3.7% | L7 Table V |
+| HiRe modular cluster 2×2 | chiplet/die/package | AX-HW（partition 粒度） | hop count；NoP 0.5 pJ/bit | cluster 內 NoC | RN weight multicast | EDP −37.4~41.7% | L7 Fig.7 |
+| HiRe attention tiling 3-phase | chiplet/PE | AX-M/AX-N＋softmax row reduction | RN 4-port；X/Y 差≤1 | **chiplet 內 NoC horizontal sync** | Q/K/V streaming | link util +16.7%；latency −25% | L7 §III-B-2/Fig.5 |
+| HiRe tensor vs data parallel | package | LLM→tensor parallel；DNN→AX-B | **memory capacity** | TP→跨 die reduction（機制未提供） | TP weight 切；DP 複製 | latency −14.1~35% | L7 p.1739 |
+| FLARE row/col/seq/2D/3D | PE→chiplet/package | AX-K(row)/AX-N(col)/AX-B(seq)/2D/3D | per-chiplet `P_cap`；BW；IMC:digital ρ | row-wise/2D/3D→**Output Reduction ✓（機制未提供）**；col/seq→✗ | row/col 切片（✗複製）；seq/3D 複製 | 4× token、30× energy | W3-1 Table II p.505（**目視**） |
+| FLARE 三引擎＋GRASP | chiplet/package | 不切 tensor（allocation/schedule） | 同上 | 不涉及 | 不涉及 | — | W3-1 Fig.3e |
+| Hemlet heterogeneous chiplet | chiplet | operator 類型（AX-LAYER/AX-OP） | DCIM 容量；NoP | 無跨 chiplet psum（local softmax+global norm） | ACIM 預載 static；DCIM 每層動態寫 Q/K/V | 2.41–5.74× | W3-2 Fig.2/7 |
+| Hemlet GLP | array/group（**非跨 die**） | 多層 weight column 交錯 | ADC 時分多工 | subarray ADC | 不複製 | 2.53×；energy +4.62% | W3-2 §4/Fig.5/6 |
+| 3D-CIMlet static/dynamic op | chiplet | operand 是否需 reprogram | RRAM endurance vs eDRAM | 單 chiplet 內 accumulator | 依 op 切片；複製未提供 | 12× EE（3D） | W3-4 Fig.3 |
+| HALO computing-cluster | chiplet | WSMM→IMC；DMM/softmax→CMOS | NoP 通訊 | 各 chiplet global accumulator | 依 cluster 切片、非複製 | cost 低 1.8× | W3-5 Fig.2 |
+| Dai multilevel operator | chiplet | combo/operator/sub-operator | write endurance、capacity | 無跨 chiplet psum | 依 operator、非複製 | — | W3-6 Alg.3 |
+| H3D-LLM 3D-STIP | 3D chiplet layer | spatial(op)＋**temporal(time slice)** | TSV bw；sparsity | 無跨 layer psum | 依 op/精度切片 | 12.3× EE | W3-7 Fig.4/5 |
+| H3D-LLM SADEF/PAQM/SATS | chiplet layer / storage | AX-SP＋AX-PREC＋AX-KV | sparsity ρ；精度 | 不涉及 | KV 分層遷移 | — | W3-7 §IV |
+| SIAM layer-wise | chiplet | AX-LAYER（**layer 不跨 chiplet**） | NoP 佔 84.7% area | chiplet 內 global accumulator | 非複製 | — | W3-8 §2.2 |
+| Big-Little chiplets | chiplet | AX-LAYER（依頻寬需求） | NoP bw；area/yield | 無跨 chiplet psum | 非複製 | EDAP 329×；IMC util 2× | W3-9（**R2 修正 venue = ICCAD 2022**） |
+| TensorCIM REGM/EOCI/ILA | chiplet MCM | AX-N/AX-K row 切；SpG 重分割 | 320 Mbps inter-chiplet | **REGM 把 reduction 留 CIM**；GB 相加 | weight row 切片、on-demand fetch | 4.58×/3.52× 能量；access −3.55× | W3-10 Fig.16.4.3 |
+| Corsair TP＋PP＋AllReduce | chiplet/MCM | TP→weight shard（AX-N/K）；PP→layer | D2D PHY；ring/tree AllReduce | 片內 **OB in-place reduction＋PPR**；跨 chiplet **AllReduce** | TP 切片；PP layer 分散 | AllReduce ~2(N−1)L+(N−1)T/B | W3-11 p.32–35 |
+| Sharma SFC NoI placement | chiplet | operator 異質＋layer 連續排列 | NoI hop；NVM endurance | chiplet 內 | 依 layer 切片 | 11.8×/2.36× | W3-12 §3.2 |
+| Tile Interleaving | chiplet | AX-M（spatial tile 跨 chiplet） | on-chiplet memory | **原文未提供** | 原文未提供 | util 53.9→92.8%；9-chiplet 1.711 TOPS | W3-13 |
+| Zexin INR | NoC/router | **reduction 樹分割**（source 依 dest 切 ≤4 block） | pipelined router；operand buffer；FID | **in-network shared vector adder**；解不開退 SIMD | 無關 | 3.37×/2.63× | L4 Fig.4/5/§V-B |
+| Zexin cross-type weight dup | macro/PE | AX-M | ACIM/DCIM 同尺寸；DCIM idle | 不跨組 reduce | weight duplication | HD 1.93×/1.56% | L4 §III.A/IV.B |
+| CMSwitch dual-mode compilation | die | **AX-MODE**（compute/memory）＋AX-LAYER 分段 | mode-switch latency `L_{M→C}, L_{C→M}` | 各 segment | write-back / weight rewrite | — | W2 C2 Eq.1–3 |
+| CINM (Cinnamon) | array/crossbar | MLIR tiling/partition | device 屬性 | device 內 | 可插拔 cost model | — | W2 C3 |
+| H3PIMAP | die/tier | weight row→tier（AX-PREC 異質） | Pareto/NSGA-II | tier 內 | accuracy row-remap | — | W2 D2 |
+| CPU/CIM ILP | chip/die | operator 二值分派 | makespan | 各側 | — | — | W2 D3 |
+| (**對照，非 CIM**) TEMP | wafer/die | replication-TP / **TSPP** / TATP / TCME / DLWS | wafer/die；HBM 6.0 pJ/bit、D2D 5.0 pJ/bit | TSPP/TATP 不切收縮維→無 all-reduce | TP 切/複製 | 見 §5 | W3 §3；TEMP 本機 PDF；`DCIM_vs_TEMP_partition_verdict.md` |
+
+> **未能確認 / 原文未提供**：`SONG`（W1 查無此文，疑筆誤）；`OCC`／`DISTIL`／`Hecaton`／`AMMA`／`Fengshui` 分割法（付費牆或擷取失敗）；wafer-scale CIM 命名式分割法（未找到，找到的是元件級 wafer-scale 記憶體與非 CIM 的 TEMP）；`CASCADE` buffer「6-bit MLC」綁定位置（R2 `?`-2）；TEMP `replication-TP` 並非原文字面名稱（R2 `?`-1）。**跨 die reduction 的硬體機制在 FLARE／AIG-CIM／3D-CIMlet／H3D-LLM／Hemlet／HALO 多半原文未提供。**
+
+---
+
+## 4. 決策樹（可直接實作）
+
+> **規則標記**：`[E]` 有實驗支持、`[I]` 推論需驗證。**本節已修正 T2 的 `F1`（軸↔代價三分）、`B1`（PolyCIM reuse 軸標定）、`E3`（跨 die K 降級為最後手段）、hold factor、`C_CIM_eff`。**
+
+### 4.1 主流程偽代碼
+
+```python
+DECIDE(layer L{M,N,K,A_bits,Wt_bits,B,kind,sparsity ρ}, 
+       hw{Rp,Cp,Rh,Ch,R_M,C_M,C_total,B_buf,s_bits,level_capacity}):
+
+# ── Stage 0：正規化（每個 A 類軸的週期成本都含 n_cyc）────────────
+    n_cyc = ceil(A_bits / s_bits)                      # [E] Sun Table IV；L5 §II.A
+    W_layer = K*N*Wt_bits
+    W_model = Σ_layers W_layer                          # 呼叫方提供
+    K_eff   = K * (1 - ρ)   # 只在 skip 粒度＝整條 K 段時可省 adder tree  # [E] L5-H/L6
+    # DCIM 專屬：容量要扣掉非 compute 佔用
+    C_CIM_eff = C_total - act_footprint - KV_footprint - psum_footprint \
+                - memory_mode_reserved                    # [E] FlexSpIM Fig.4、CMSwitch；[I] 推廣
+
+# ── Stage 1：容量 regime（根節點）───────────────────────────
+    if C_CIM_eff >= W_model:      regime = MODEL_STATIONARY   # [E] TriCIM A1
+    elif C_CIM_eff >= W_layer:    regime = LAYER_STATIONARY   # [E] TriCIM A2
+    else:                         regime = TILE_STATIONARY    # [E] TriCIM A3
+
+# ── Stage 2：切哪個軸（條件式，不是固定優先序）────────────────
+    # 先問「activation 是否足夠大、spatial 利用率是否能吃滿」
+    if kind == attention:                    # [E] HiRe/Zexin：sequence 軸 = M 且 = K
+        sequence_axis_is_M_and_K = True      # softmax/QK^T 的 row reduction 不可跨 die
+    if activation_size < theta_util:         # [E] INDM p.1113「P-Parallel may not be optimal…small activation」
+        candidate = [AX_N, AX_LAYER]         # 改切 output channel / layer
+    else:
+        candidate = [AX_B, AX_M, AX_N, AX_LAYER]   # [E] FLARE Table II：seq/M 無 reduction
+    # 只有候選都用盡才把 AX_K 放進 die 內候選；跨 die 時 AX_K 是最後手段
+    if need_more_parallel and level == die:
+        candidate += [AX_K]
+
+# ── Stage 3：切幾份 × 放哪一級（各自層級公式不同，不可共用）─────
+    if regime == MODEL_STATIONARY:
+        parts = allocate_tiles(L, n_tile)        # [E] TriCIM C5 min_tile_l 公式
+        level = TILE; reduction = ARRAY_ADDER_TREE
+    elif regime == LAYER_STATIONARY:
+        groups = group_layers(W_layer_list, C_CIM_eff)   # [E] TriCIM A6
+        level = TILE; reload_granularity = FULL_TILE_FULL_MATRIX  # [E] TriCIM F3
+    else: # TILE_STATIONARY
+        (FR, FC) = fold_counts(L, Rp, Cp, Rh, Ch, R_M, C_M, axis)  # 修正版公式
+        level = MACRO; reduction = ACCUMULATOR_BUFFER
+
+# ── Stage 4：K 是否超過 in-situ 上限（逐層級）────────────────
+    # 注意：先確認收斂軸映到 rows 還是 columns（PolyCIM 是 columns）
+    R_insitu = Rp * R_M if reduction_axis_is_rows else Cp * C_M   # [E] Sharma Table IV
+    if K > R_insitu:
+        FR = ceil(K / R_insitu)                  # [E] Sun Eq.(5)
+        reduction = ACCUMULATOR_BUFFER           # [E] Sun Eq.(14)：每 fold 1R+1A+1W
+        assert reduction_level <= DIE_INTERNAL   # [I] 最後手段，非絕對禁忌（見 §4.3）
+
+# ── Stage 5：reduction 放最低可行層級 ──────────────────────
+    reduction = place_reduction(lowest_feasible_level)   # [E] Sun FAN / Zexin INR
+
+# ── Stage 6：weight 處置（三分交換，修正 T2 F1）────────────
+    if cut_axis == AX_N:      # output channel
+        weight = SLICE;  cost = ACTIVATION_BROADCAST      # [E] FLARE col ✗/✓/✗
+    elif cut_axis == AX_K:    # contraction
+        weight = SLICE;  cost = OUTPUT_REDUCTION          # [E] FLARE row ✗/✗/✓（不複製 activation）
+    elif cut_axis in {AX_M, AX_B}:
+        weight = REPLICATE; cost = HALO_or_NONE           # [E] FLARE seq ✓/✗/✗
+    # 判準不是 bytes：weight 是否需 reprogram
+    if implying_reload:
+        granularity = FULL_TILE_FULL_MATRIX                # [E] TriCIM
+        schedule    = ping_pong if Tcomp/Twt < 0.5 else sequential  # [E] TriCIM I4
+
+# ── Stage 7：跨 die 例外（僅當單 die 放不下）────────────────
+    if W_layer > C_CIM_eff(die):
+        level = CHIPLET
+        axis  = AX_N (weight shard) or AX_M (halo)        # [E] INDM/FLARE/TSPP
+        if axis == AX_N and unavoidable: reduction = ALLREDUCE  # [E] Corsair
+        elif axis == AX_K: reduction = LAST_RESORT_ALLREDUCE    # [I] 非絕對禁忌
+```
+
+### 4.2 容量 regime 判定（含 `C_CIM_eff`）
+
+| Regime | 判定式 | 行為 | weight 重載 | 對應優化 | 出處 |
+|---|---|---|---|---|---|
+| **Model-Stationary** | `C_CIM_eff ≥ W_model` | 全權重推論前載入、全層 pipeline | **無 runtime 重載** | load-balancing tile 配置、cross-layer scheduling | TriCIM（L1）Table I p.2189；**本檔目視** |
+| **Layer-Stationary** | `W_model > C_CIM_eff ≥ W_layer` | 模型切 layer group，群內 pipeline、群間依序 | **群間需重載**（粒度＝完整 CIM tile、full-matrix、無 partial update） | layer grouping、overlapped weight reloading | L1 Table I/§V-B p.2193 |
+| **Tile-Stationary** | `C_CIM_eff < W_layer` | 單層切 sub-tile 依序處理 | **每 tile 重載** | CIM-aware tiling、buffer-aware ordering | L1 Table I/§VI-A |
+
+> **`C_CIM_eff` 修正理由**：DCIM 同一塊 array 常同時放 activation / membrane potential / dynamic weight。FlexSpIM unified weight/pot memory：L1 weight 0.1 kB 但 pot 96.0 kB；HS-min 23.4 kB vs WS-only 69.8 kB。若用整塊容量當 `C_CIM`，會在 HS/dual-mode/動態 KV 場景誤判為 model-stationary。[E] L6 Fig.4（**目視**）；W2 CMSwitch；[I] 修正式。
+
+### 4.3 `K` 超過 in-situ 上限的處置（含層級與證據）
+
+| ID | if-then | 層級 | 證據 |
+|---|---|---|---|
+| E1 | `K > R_insitu` → `FR = ceil(K / R_insitu)`（先確認收斂軸映 rows 還是 columns） | array→macro | [E] L2 Eq.(5)；**PolyCIM column-wise accumulation 為反例**（R1 §OG-9） |
+| E2 | 每 fold 用 **accumulator buffer** 收斂（read-add-write）；`AB_RD/WR = N·M·ceil(K/R)` | macro | [E] L2 Eq.(14) p.1196 |
+| E3 | **優先** die 內第二級 adder（accumulator/FAN/channel accumulator）；**其次** in-network reduction（Zexin INR）；**最後** 才 AllReduce。跨 die 切 K 是**最後手段、不是禁忌**：IN/FLARE-col/TSPP 都避免，但 Corsair TP+AllReduce 證明可做。 | array→chiplet | [E] L2 Fig.15；[E] L4 §V-B；[E] W3 Corsair p.32；[I] 降級修正（R1 §OG-6） |
+| E4 | `R`（或 `Rp`）越小 → accumulator 交易越多、energy 越差；EDP 最佳點落在中間 | macro | [E] L2 Fig.13 p.1199；[E] L3 Table IV |
+| E5 | 能效隨 K 上升到 `K=256`（Digital-6T `Rp=256`）見頂；`K>512`（on-chip 容量）後 TOPS/W plateau ~1.75 | array/memory | [E] L3 Fig.10c/p.1224–25（**註**：256 是 K sweet spot、512 是 weight matrix 大小 cap，**不同軸**，勿合併敘述——R2 註） |
+| E6 | 若 K 超過 on-die 收斂能力且無法加大 R：優先 (a) weight 空間 bit-slicing 攤開，或 (b) input 時間 bit-serial 攤開；不要 (c) 跨 die 傳 partial sum | array | [I] 由 W1 A3/A4/A7 + E3 合成 |
+| E7 | 若需 die 內第二級 reduction：用 INR 或 output buffer in-place reduction，但先做 deadlock 分析並保留 SIMD 回退 | tile/die | [E] L4 §V-B3；W3 Corsair p.35 |
+
+### 4.4 軸選擇：條件式（不是 `N > M > K` 固定序）
+
+- **PolyCIM 原文真實優先序**：output-reuse（對 GEMM = **K**，因 partial sum 位寬大、移動最貴）→ input-reuse（= **N**）→ non-reuse → weight-reuse（= **M**，可 replication、容量夠才用）。**T2 舊版把三個標籤全部錯位、方向相反**，本檔不採用。[E] W2 PolyCIM §3.4.2（**目視**）；R1 §OG-2
+- **但不存在單一固定優先序**：INDM Table VII 同一 ResNet-18 內 Layer1 全切 P（spatial M）、Layer7/10/14 全切 output channel。**先問「此層 activation size 是否夠大、spatial 利用率能否吃滿」**——INDM 原文：「P-Parallel may not be optimal for layers with a small activation size」。[E] L7 p.1113/Table VII（**目視** Fig.8）
+- **DW-CONV / 小 `C_IN`** → 選 **IS**（columns→output pixel，16/16 columns 全開），否則 WS 下 15/16 columns idle。[E] L2 p.1194/1198
+- **attention** → sequence 軸同時是 M 與 K，softmax/QK^T 的 row reduction 不可跨 die。[E] L7 §III-B-2；L4 §II.B/V-B
+
+### 4.5 有實驗 vs 推論（一句話）
+
+**有實驗支持 `[E]`**：容量三分區（TriCIM 4 模型×4 硬體）、FLARE 的 ✓/✗ 矩陣、Sun 三種 floorplan 與 36×64/72×32、Sharma `Rp/Cp/Rh/Ch` 與 K=256/512、INDM P/Q/K 7-parallel 與 Table VII、Wang dual-bit/block-FP/patch-skip、FlexSpIM HS、Zexin INR、Corsair AllReduce 成本、TensorCIM REGM。
+**推論需驗證 `[I]`**：跨 die 切 K 的「最後手段」定位、`C_CIM_eff` 修正式、DCIM 上 axis 優先序的**代價權重**、ping-pong 平行度減半對 end-to-end 的影響、FLARE/Tile Interleaving 的跨 die reduction 機制、DCIM-specific 跨 die cost model。
+
+---
+
+## 5. 與 TEMP 的對照表
+
+> TEMP（HPCA 2026，wafer-scale，**非 CIM**）：機制為 replication-TP / TSPP / TATP relay / TCME / DLWS / selective transfer。對照來源：`paper_TW/DCIM_vs_TEMP_partition_verdict.md` §3、§5。**注意 TEMP 的維度慣例與 BLAS/DCIM 相反**：TEMP `O[B,M,K]=I[B,M,N]·W[N,K]` 中 **N 是收縮維、K 是輸出維**（`W3 §1.2`；R1 §4-L6）。
+
+| TEMP 機制 | 對應本目錄哪個方法 | 判定 | 是重複發明 / 缺的 / 需改 | 硬體機制理由（出處） |
+|---|---|---|---|---|
+| **replication-TP**（切含收縮維的 (N,K)、activation 複製、device pair all-reduce） | 無直接對應；最接近 Corsair TP、FLARE 2D/3D | **反而有害** | **需改** | 切到收縮維 → 強制跨 die psum reduction；DCIM reduction 超過 in-situ（256/512）就退回 main memory。activation 複製吃第一號能量項（Sun activation buffer 38%）。[E] TEMP Fig.4(a)；L7 INDM p.1109；L2 Fig.4 p.1194 |
+| **TSPP**（切 M 與輸出維 K、**不切收縮維 N**；ring 交換、通訊與 compute 重疊） | 等價於 C7 的「先切 AX-M/AX-N、不切 AX-K」；也對應 FLARE col/seq | **部分有效（切法正確、overlap 假設要改）** | **重複發明**（TEMP 用不同命名表達同一原則） | 不切收縮維 ⇒ 無 all-reduce、無 activation replication，正是 DCIM-aware 最佳切法。但 weight 若被選為 stream operand，在 DCIM 是 full-matrix reprogram、同 macro 不可與 compute 平行。[E] TEMP Fig.10；L1 §V-B；Corsair |
+| **selective transfer**（每 round 固定挑 bytes 較小者 stream） | 本目錄 **AX-W**（weight 處置判準）與 P6 | **反而有害（WS DCIM）／部分有效（IS DCIM）** | **缺的**：本目錄應把「bytes 判準」換成「reprogram 成本的 operand 判準」 | DCIM 有成本不對稱：1 bit weight（program、不可重疊）≠ 1 bit activation（stream、可 overlap）。「bytes 較小 ≠ 較便宜」。[E] TEMP §V；W3 §4.3；L1 §V-B |
+| **TATP relay**（雙向冗餘傳輸、每步 ≤1 physical hop） | 本目錄 **AX-REC / 拓樸自覺排程**；in-network reduction 屬 AX-RED | **部分有效（拓樸排序可留、雙向冗餘該捨）** | **需改** | 拓樸自覺、單份、≤1-hop 是通用概念；但雙向冗餘對 weight＝2× full-matrix reprogram。DCIM 的 hop latency 可被高 compute latency 吸收，首要約束是傳輸粒度/頻寬與 buffer 容量。[E] TEMP Fig.8/Alg.1；L1 p.2195–96；L4 INR |
+| **TCME 統一表示**（B/M/N/K 四維＋spatio-temporal round） | 本目錄 §2 的 A/C 軸清單＋AX-ST | **部分有效（帳本格式可留）** | **需改**：缺 array-level 與 bit 軸、只有 W/I 兩個 operand | (i) N/K 慣例與 DCIM/BLAS 相反，不釘死會把成本表讀反；(ii) 只到 die 級，缺 `{t_ow,t_ic,t_oc,t_kh,t_kw} ≤ {p_*}`；(iii) 無法表示 FlexSpIM 的第三種 stationary operand（membrane potential）；(iv) 無 bit-precision 軸。[E] TEMP Fig.10；L1 Fig.9；L6 Fig.4 |
+| **DLWS solver**（`T_intra=Collective+max{Comp,P2P}`、DP 分段＋GA） | 本目錄 **INDM cross-layer DP**（`O(L·M²)`）＋ §4 決策樹 | **部分有效（骨架可留、cost model 內核必須重寫）** | **重複發明＋需改** | `max{Comp,P2P}` 前提「計算與 P2P 可重疊」對 weight 路徑不成立（同 macro weight write 與 compute 互斥）。模型漏三個一級成本：weight reprogram、bit-serial buffer access（信 access 次數不信 bytes）、reduction 位置。[E] TEMP Eq.2–4；L1 §V-B；L7 Eq.(5)；W3 §4.3 |
+| **容量決定 regime**（TEMP 以 per-die memory capacity 為軸） | 本目錄 **AX-MODEL 三分區**（TriCIM `C_CIM` vs `W_model/W_layer`） | **有效（跨架構通用）** | **重複發明**（兩個獨立來源指向同一結構） | 容量是根本限制；切開後必然產生 reduction / weight-movement 成本。[E] TEMP Table I；L1 Table I |
+| **topology-aware mapping / congestion-aware routing** | 本目錄 AX-REC；INDM HierInterconnect | **有效** | **本目錄較弱的一塊**（可補） | 純拓撲排程概念，與資料型別無關；DCIM-on-WSC 仍由 D2D 承載 activation 與 reload 流量。[E] TEMP §5.2；L7 INDM-HierInterconnect |
+
+**可搬與不可搬一句話**：TEMP 的**維度切法（TSPP/TATP 不切收縮維＝本目錄 C7）是可搬的**；**selective transfer 的判準（bytes）與 DLWS 的 cost model 內核不可搬**。真正的勝負手是「`C_CIM_eff` 是否足以讓 weight 常駐（model-stationary）」。[I] 由上表綜合。
+
+---
+
+## 6. 陷阱清單（反例）
+
+1. **切 contraction 維 `K` 當第一刀。** K 通常最大，但切 K 必產生 reduction；跨 die 時 24-bit psum 比 8-bit W/A 寬、inter-die 1 bit ≈ 49 個 8-bit MAC 能量。→ 先切 `N`/`M`。[E] L7 p.1109/Table III；W3 FLARE Table II
+2. **預設複製 weight。** 空間切（M/sequence）確實需要複製 weight，但 DCIM 的 weight reload 是**完整 tile + full-matrix、不可與 compute 重疊**；只有 pipeline 平衡、空間輸入重用、提高平行度三種情況才划算。[E] L1 §V-B；W1 ISAAC A1/A4/A11
+3. **用 bytes 當 partition 成本。** DCIM 成本主導項是 array 啟動次數、ADC convert 次數、buffer access、**reprogram 事件**。Hemlet GLP 交錯省 ADC 但 energy +4.62% 就是反例。[E] L4；W3 Hemlet §6.2；W2 CiMLoop
+4. **層級混淆：把「macro 內 array 切法」套到 die 級（或反之）。** 例如把 ISAAC A2（**array 內** 256×256→4×128×128）直接當 Sun Fig.14（**tile 級** 4 顆獨立 macro＋FDN/FAN）——**R1 明確指出 T2 舊版 C9 曾畫等號**。[E] W1 ISAAC p.6；L2 p.1200；R1 §OG-7
+5. **假設一定有獨立 columnwise adder tree。** FlexSpIM 用 column carry-chain、CASCADE 用 buffer 類比累加；方法不可直接移植。[E] L6；W1 CASCADE
+6. **忽略 bit-serial 週期放大。** 8-bit activation、s=1 → 8 cycles；成本函式不含 `n_cyc` 會嚴重低估 K fold。[E] L2 Table IV
+7. **只看平均 hop、不看最壅塞鏈路。** mapping 好壞由 bottleneck link 決定（INDM `degrade_ratio`）。[E] L7 Eq.(4)
+8. **逐層貪心選切法。** 相鄰層切法不同會把層界通訊從 halo 升級成 all-gather；必須全域 DP。[E] L7 Eq.(5)
+9. **忘記 spatial 切的 halo 成本。** conv 層界要傳 `S−1` 欄；sequence 切要複製 weight。[E] L7 Fig.10(a)；W3 FLARE Table II
+10. **預設「一層可以跨 chiplet 切」。** SIAM 明文 layer 不跨 chiplet；Tile Interleaving 雖可切但把 reduction 跨到 die。[E] W3 SIAM §2.2、Tile Interleaving
+11. **把 partial sum 當 activation 寬度處理。** psum 24/36-bit，移動比 activation 貴一個量級。[E] L7 p.1115；L2 Fig.2
+12. **用 weight duplication 取代 activation replication（或反之）而不比較。** 兩者零和；DCIM 判準是「哪個 operand 需 reprogram array」。[E] W3 §4.3
+13. **認為多 macro 的 K 切免費（反正有 FAN）。** 4×1 垂直堆疊需 2-stage FAN 且 buffer 頻寬 ×4 → memory-bound；1×4 multicast 只需 1× 頻寬且無跨 macro reduction。[E] L2 Fig.15/17（**目視**）
+14. **忽略 ADC 時分多工上限。** peripheral ADC sharing 決定跨 array 平行度真實上限；partition group size 必須與 ADC sharing 結構對齊。[E] W3 Hemlet §4.1
+15. **在小 GEMM / memory-bound 層硬用 CiM。** CiM integrated cache 不提升 memory-bound 層；小 K GEMM 反而比 baseline 差。[E] L3 Table V
+16. **深 pipeline 不計 bubble。** ISAAC 式深 pipeline 在 stride/dependency 下有 bubble；PipeLayer 才引入 parallelism granularity `G`。[E] W1 PipeLayer
+17. **在同一份 CIM array 上混跑動態與靜態 weight。** dynamic weight 需第二份 array（ping-pong/pipeline）。[E] L1 §VI-B/§VIII-C
+18. **假設 block-FP / 精度不影響 partition。** 精度不對稱會改變 cell 佔用與等效 MAC（IS 下 W/A 不對稱使 MAC 砍半）。[E] L2 p.1198；L5 §II.A
+19. **數 8-bit MAC 卻忘了 accumulator 頻寬。** 大量 fold 讓 accumulator buffer 交易成 energy 瓶頸；R 太小反而更差。[E] L2 p.1196/1199
+20. **把 reduction 留在跨 die 鏈路上「等之後再優化」。** deadlock 與壅塞會結構性出現；需協定層保證無循環相依。[E] L7 HiRe §IV-D
+21. **（R1 新增）忽略稀疏度。** >80% 稀疏的 ReLU 層若不把 ρ 計入有效 K，會高估 fold 與 accumulator 交易；且 skip 粒度必須＝一整條 K 段才省 adder tree。[E] L5-H/L6；R1 §1.1
+22. **（R1 新增）用整塊 array 容量當 `C_CIM`。** 必須扣 activation/KV/psum/memory-mode 保留，否則 HS/dual-mode/動態 KV 場景誤判為 model-stationary。[E] L6 Fig.4；W2 CMSwitch；R1 §OG-5
+23. **（R1 新增）把「非分割成本優化」計入分割方法數。** low-toggle / center+offset / MDM row 排序 / MacroDimRetile 都是編碼或數值技巧，不切任何維度。[E] R1 §3.2-3
+24. **（R2 修正）混淆 K sweet spot（256）與 weight matrix cap（512）。** 兩者不同軸，合併敘述易誤讀。[E] L3 p.1224–25
+
+---
+
+## 7. 待驗證清單與來源清單
+
+### 7.1 待驗證 / 原文未提供（不得當事實）
+
+| # | 項目 | 狀態 | 出處 |
+|---|---|---|---|
+| V1 | 純 digital SRAM bit-serial + columnwise adder tree 的具名 array 級 mapping 方法 | **原文未提供**（最接近 PICO-RAM 類比 SRAM 域、ISAAC digital 抽象） | W1 Part D |
+| V2 | bit-serial 的 bit 排序／跨 cycle bit 流如何決定 tile 形狀 | **原文未提供**（無專門論文） | W2 §10 Gaps-1 |
+| V3 | 跨 die reduction 的硬體機制（FLARE/Tile Interleaving 標 Output Reduction ✓ 但機制未描述） | **原文未提供** | W3 §5-2 |
+| V4 | wafer-scale CIM 命名式分割法 | **原文未提供**（只有元件級 wafer-scale 記憶體；TEMP 為非 CIM） | W3 §5-1 |
+| V5 | DCIM-specific 跨 die cost model（以 bit-serial cycle 數/ buffer access 數為單位） | **原文未提供**（TEMP dense PE cost model 不可直接用） | W3 §5-5 |
+| V6 | weight 的 per-tile 重載粒度與時機；partial-sum 跨 macro 搬運能量 | **原文未提供**（多數框架只說 layer 邊界由 DRAM prefetch 到 WL2） | L7 §5；W2 §10-4 |
+| V7 | FlexSpIM sub-array banking 切法、FC 層 mapping | **原文未提供** | L6 |
+| V8 | Zexin DCIM 內部 array tensor 切法、duplication factor 公式 | **原文未提供**（沿用 AutoDCIM） | L4〈缺口〉 |
+| V9 | Wang DBS subarray 內單一 weight 逐格對照、weight duplication factor | **原文未提供** | L5〈缺口〉 |
+| V10 | CASCADE buffer「6-bit MLC」綁定位置 | **無法確認**（原文有 6-bit digital output 與 MLC，但未見該數字綁在 buffer RRAM） | R2 `?`-2 |
+| V11 | TEMP `replication-TP` 字面名稱 | **無法確認**（原文只有 TSPP/TATP/TCME/DLWS；疑卡片自創縮寫） | R2 `?`-1 |
+| V12 | κ（CIM array weight write per bit 常數）、weight programming 絕對 pJ/bit | **原文未提供** | `DCIM_vs_TEMP…` V1 |
+| V13 | im2col 是否顯式使用、其 buffer 需求 | **原文未提供**（五篇硬體論文關鍵字命中 0） | `DCIM_vs_TEMP…` V9 |
+| V14 | 本目錄 `[I]` 推論：跨 die 切 K 的「最後手段」定位、`C_CIM_eff` 修正式、軸優先序的**代價權重**、ping-pong 平行度減半之 end-to-end 影響 | **需目標模型實測驗證** | 本檔 §4；R1/R2 |
+| V15 | multi-tenant / CIM sharing、dynamic shape（runtime 可變 sequence/batch） | **全素材 grep 0 命中；已知空白** | R1 §1.6/§1.7 |
+| V16 | SONG、OCC、DISTIL、Hecaton、AMMA、Fengshui 的分割法 | **未能確認**（查無此文／付費牆／擷取失敗） | W1 Part D；W2 §9；W3 §5-4 |
+
+### 7.2 本地論文來源
+
+| 代號 | 論文（檔名在 `/mnt/c/Users/user/IEEE_Papers/paper_TW/` 或 `/mnt/c/Users/user/IEEE_Papers/`） | 主要層級 | DOI / URL |
+|---|---|---|---|
+| L1 | `2026_TriCIM_…_11511842-dual.pdf`（TVLSI 34(7):2187–2200, 2026） | chip/die | 10.1109/TVLSI.2026.3688907 |
+| L2 | `2024_Xiaoyu Sun_…_10318181-dual.pdf`（TCAD 43(4):1191–1203, 2024） | macro/tile | 10.1109/TCAD.2023.3333290 |
+| L3 | `2025_Tanvi Sharma_…_11026257-dual.pdf`（TETC 13(3):1215–1229, 2025） | array/macro/cache | 10.1109/TETC.2025.3574508 |
+| L4 | `2025_Zexin Fu_…_11261801-dual.pdf`（ISLPED 2025） | macro/tile/NoC | 10.1109/ISLPED.2025.11261801 |
+| L5 | `2026_Dengfeng Wang_…_11535964-dual.pdf`（TCAS-I 2026） | array/macro/CIM group | 10.1109/TCSI.2026.3695668 |
+| L6 | `2025_Nicolas Chauvaux_…_11043507-dual.pdf`（ISCAS 2025） | array/macro | 10.1109/ISCAS56072.2025.11043507 |
+| L7 | `2024_Jinming Zhang_INDM_…_10318183-dual.pdf`（TCAD 43(4):1107–1120, 2024）＋ HiRe（TVLSI 2026） | die/chiplet/package | INDM：TCAD 43(4); HiRe：TVLSI 2026 |
+| TEMP | `TEMP_A_Memory_Efficient_Physical-Aware_Tensor_Partition-Mapping_Framework_on_Wafer-Scale_Chips-dual.pdf` | wafer/die（非 CIM） | 10.1109/HPCA68181.2026.11408568 |
+| FLARE | `FLARE_A_Fine-Grained_In-Memory_Computing_Heterogeneous_Multi-Chiplet_Accelerator_for_Large_Language_Models.pdf`（JETCAS 16(2):500–513, 2026） | PE→chiplet | 10.1109/JETCAS.2026.3677596 |
+| INDM 英文抽取 | `/mnt/c/Users/user/IEEE_Papers/pdfwork/indm_en.txt` | die/chiplet | 同上 |
+
+### 7.3 網路方法來源（URL）
+
+| 方法 | URL |
+|---|---|
+| ISAAC | https://ieeexplore.ieee.org/document/7551379/ ｜ http://www.cs.utah.edu/~rajeev/pubs/isca16.pdf |
+| PUMA | https://arxiv.org/abs/1901.10351 |
+| RAELLA | https://arxiv.org/abs/2304.07935 |
+| TIMELY | https://arxiv.org/abs/2005.01206 |
+| CASCADE | https://web.eecs.umich.edu/~zhengya/papers/chou_micro19.pdf |
+| PICO-RAM | https://arxiv.org/abs/2407.12829 |
+| DRISA | https://ieeexplore.ieee.org/document/8686604/ |
+| PipeLayer | https://ieeexplore.ieee.org/document/7920854/ |
+| CiMLoop | https://arxiv.org/abs/2405.07259 ｜ 原始碼 https://github.com/mit-emze/cimloop |
+| CIMFlow | https://arxiv.org/abs/2505.01107 |
+| PolyCIM | https://arxiv.org/abs/2609.34351 |
+| CIM-Tuner | https://arxiv.org/abs/2601.18070 |
+| SynDCIM | https://arxiv.org/abs/2411.16806 |
+| CIM-MLC | https://arxiv.org/abs/2401.12428 |
+| CMSwitch | https://arxiv.org/abs/2502.17006 |
+| CINM (Cinnamon) | https://arxiv.org/abs/2301.07486 |
+| PIMCOMP | https://arxiv.org/abs/2411.09159 |
+| NicePIM | https://arxiv.org/abs/2305.19041 |
+| RNC | https://arxiv.org/abs/2409.18841 |
+| Hemlet | https://arxiv.org/abs/2511.15397 |
+| H3PIMAP | https://arxiv.org/abs/2503.07778 |
+| CPU/CIM ILP | https://arxiv.org/abs/2607.05240 |
+| LRMP | https://arxiv.org/abs/2312.03146 |
+| MDM | https://arxiv.org/abs/2511.04798 |
+| FLARE | 10.1109/JETCAS.2026.3677596 |
+| AIG-CIM | IEEE Xplore 11295232（DAC 2024） |
+| 3D-CIMlet | 10.1109/DAC63849.2025.11133077 |
+| HALO | 10.1109/JETCAS.2024.3427421 |
+| Dai et al. | 10.1109/TCAD.2024.3416256 |
+| H3D-LLM | 10.1109/ICCAD66269.2025.11240702 |
+| SIAM | 10.1109/ASICON52560.2021.9620238 |
+| Big-Little | 10.1145/3508352.3549447（**ICCAD 2022**，R2 修正） |
+| TensorCIM | 10.1109/ISSCC42615.2023.10067285 |
+| Corsair | 10.1109/MM.2025.3593444 |
+| Sharma et al. (chiplet) | https://arxiv.org/abs/2312.11750 |
+| Tile Interleaving | 10.1145/3453688.3461499 |
+| InDenT | 10.1109/TCASAI.2025.3599145 |
+| TEMP | 10.1109/HPCA68181.2026.11408568 |
+
+---
+
+## 8. 本版對 T1/T2 的修正清單（依 R1/R2）
+
+| # | 原 T1/T2 錯誤 | 修正後 | 依據 |
+|---|---|---|---|
+| 1 | TriCIM CIM 總容量 `65MB→0.72MB` | **63MB→0.5625MB**（Fig.2(b)：63MB/8.625MB/5MB/1MB/0.5625MB/0.72MB） | R2 `✘`-1 |
+| 2 | PIMCOMP 約束 `HWP=IOK²、H∤O` | **`HWP=IOK²`、禁止 `O\|H`**（原文「we can not choose H such that O is a factor of H」） | R2 `✘`-2 |
+| 3 | Wang DBS low-toggle `25.5–28.2%` | **25.5–29.2%**（Fig.23/24 六標籤 −29.0/−25.5/−28.2/−29.2/−25.9/−28.2） | R2 `✘`-3 |
+| 4 | TIMELY `A/D 佔 61%`（歸為 TIMELY 自身） | **61% 是 TIMELY 引用 ISAAC [58] 的數字**，非 TIMELY 自身 | R2 `✘`-4 |
+| 5 | T2 `F1`：「切 K/N（channel）⇒ weight slicing、activation 複製」 | **三分表**：切 N⇒activation broadcast；切 K⇒output reduction（**不複製 activation**）；切 M⇒weight replication。依據 FLARE Table II（**目視**：row ✗/✗/✓、col ✗/✓/✗、seq ✓/✗/✗） | R1 P0-1 |
+| 6 | T2 `B1`：「PolyCIM 優先序 N→M→K」 | **PolyCIM 真實優先序 output-reuse(=K)→input-reuse(=N)→non-reuse→weight-reuse(=M)**；且 INDM Table VII 證明**不存在固定優先序**，改為「容量/利用率條件式」 | R1 P0-2 |
+| 7 | T2 `E3`/`H2`：「永不跨 die 切 contraction」標 `[E]` 鐵律 | 降級為「**最後手段**」；補 Corsair TP+AllReduce 與 TEMP replication-TP 反例 | R1 P0-3 |
+| 8 | 缺 AX-SP 稀疏軸與有效 K 折減 | **新增 AX-SP＋ρ 項**（L5-H/L6/W3 H3D/TensorCIM） | R1 P0-4 |
+| 9 | 缺 AX-MODE / KV-cache 軸（T2 全篇 0 次 CMSwitch/KV） | **新增 AX-MODE、AX-KV**（CMSwitch、H3D SATS） | R1 P0-5 |
+| 10 | T2 `B3` 漏 attention 的 softmax reduction | **新增 attention 例外**（sequence 軸＝M＋K 耦合） | R1 P1-6 |
+| 11 | fold 公式只用 `R,C` | **加 hold factor**：`FR=ceil(K/(Rp·R_M))`、`FC=ceil(N/(Cp·C_M))`，週期 ×`Rh`/`Ch`；註 Sun 是 `Rh=Ch=1` 特例 | R1 P1-7；§4.1 |
+| 12 | T2 `A1` 用整塊 array 容量當 `C_CIM` | **改用 `C_CIM_eff`**（扣 activation/KV/psum/memory-mode） | R1 P1-8 |
+| 13 | T2 `C9` 把 ISAAC A2（array）等於 Sun Fig.14（tile） | **分拆層級** | R1 P1-9 |
+| 14 | T2 `G2` 未註 Sun 專屬 | **加註**，補 Wang DBS-C LUT-based IS 反例 | R1 P1-10 |
+| 15 | T2 `R0.1`「K 必映到 rows」 | **加註 `[Sun-only]`**，補 PolyCIM column-wise accumulation | R1 P1-11 |
+| 16 | `e_MAC` 單位寫「pJ/bit」 | **0.024 pJ 是 per 8-bit MAC**；「1 bit ≈ 49× MAC」只在「1 bit 鏈路 vs 1 個 8-bit MAC」成立 | R1 §5-1；R2 #15 |
+| 17 | `C6`/`E4`/`H5` 當通則 | **標 workload/平台相依**（Sun MLPerf Mobile；HiRe 2×2 在其 NoP 0.5 pJ/bit、UCIe 3.0 參數下） | R1 P1-13 |
+| 18 | 方法計數膨脹（Hemlet 計 2 次、Zexin sequence blocking 非本文貢獻、Sun ReconfigMultimacro＝ScaleOut、兩個 Sharma 未區分） | **去重**；Zexin sequence blocking 註明為 X-Former baseline；Sharma 分 L3（T.T. Sharma）與 W3-12（H. Sharma） | R1 §3.1；§3B 表已註 |
+| 19 | Big-Little venue「GLSVLSI 2022」 | **ICCAD 2022** | R2 `?`-3 |
+| 20 | 缺 AX-REC、multi-tenant/dynamic-shape 缺口 | **新增 AX-REC** 與 §7.1 V15 | R1 P2-16 |
+
+---
+
+*文件結束。所有標 `[I]` 者為待驗證推論；標「原文未提供 / 未能確認」者不得當事實使用。*

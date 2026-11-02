@@ -1,0 +1,643 @@
+# Wang TC'25 導讀簡報草稿（v2）
+**X. Wang et al., "On Task Mapping in Multi-chiplet Based Many-Core Systems to Optimize Inter- and Intra-chiplet Communications," IEEE Trans. Computers, vol. 74, no. 2, pp. 510–523, Feb. 2025.**
+
+> v18 變更：P15 Future Work 壓成一句；細節（為何可能／什麼破壞 TU／方向／判準）移到摺疊的講稿備忘。
+>
+> v17 變更：新增 P15 Future Work —— 把 TU 的手法搬回 Liu & Radetzki MCSoC'23 的 deadlock-free mapping+routing；含「為何可能」「什麼破壞 TU」「可嘗試的方向」「成功判準」。
+>
+> v16 變更：新增 P13 Conclusion（速度 / offline→online / 保持 exact / power 收在迴圈內）；文末新增 §B 教學：intra-chiplet task mapping 的最簡講法，以及釐清 power constraint 是在哪一層做（跨 chiplet 交換，不是 chiplet 內部；目標是各自低於上限，不是拉平均）。
+>
+> v15 變更：P7 刪掉獨立的「The transfer」項 —— 線性化本身不省任何東西（反而讓變數平方），縮減完全來自 TU；只保留一行說明「先線性化才有 constraint matrix 可談」作為 TU 項的鋪陳。全頁剩兩大項。
+>
+> v14 變更：P7 的「plain LP」改為精確用語「LP relaxation」。
+>
+> v13 變更：P7 把「矩陣長什麼樣」與「這個形狀買到什麼」併成一項 —— 全頁三大項：① 還是整數問題 ② transfer ③ 矩陣是 TU 所以 BLP 可當 LP 解；cost 表格放版面右／底。
+>
+> v12 變更：P7 同樣去符號化 —— 只留「變數個數」與「矩陣長什麼樣」，n / N / π^P / W / |T||R| 全部拿掉，複雜度改用 64 tasks × 16 chiplets 的具體數字表達。
+>
+> v11 變更：P6 重寫 —— 全部改成白話，不出現任何先前沒定義的數學符號（ω、π、|C|、|T|、|R| 等一律拿掉），複雜度改用「每個 task 的選擇數」與具體數字表達；Lever ①/② 更名為 Solution ①/②。
+>
+> v10 變更：P3 換成 Jim 自己的 bullet 版本；Current Status 原樣保留，bottleneck 補上 MILP，root cause 改為「非凸 → B&B → worst case 2ⁿ」。
+>
+> v9 變更：P3 的 root cause 改成「整數可行集非凸 ⇒ 只能鬆弛成凸集再用 B&B 暴力修補」。
+>
+> v8 變更：§A.2 拆開講解 branch 與 bound 各自的角色，並用 `P_LP ⊇ conv(S)` 的幾何說明「為什麼會分支 / 什麼時候不用分支」。
+>
+> v7 變更：把「confined to small meshes」改成「confined to small problem instances，瓶頸是問題規模不是 topology」—— [6] 在 mesh/torus/hexagonal 上同樣爆掉，且該方法本來就標榜 topology-agnostic。
+>
+> v6 變更：§A.2 補上 B&B 的實際運作（只分岔分數變數、bound pruning、樹大小由 integrality gap 決定），以及與 Radetzki §V-E model reduction 的對照。
+>
+> v5 變更：P7 與 §A.3 把 `2ⁿ` 的 `n`（= `|T||R|`，BQP 二元變數數）與 `N³` 的 `N`（= `(|T||R|)²`，BLP 線性化後變數數）明確分開；補上「B&B 最壞界 2ⁿ」與「可行解列舉 `|R|^|T|`」兩個不同基準的對照。
+>
+> v4 變更：Lever 1 的複雜度改用「每個 task 的選擇數」表述 —— `|R|·k → |R|`，縮小倍率就是 `k`（每 chiplet 核心數）；
+> 同時標注論文 `|C|` 符號在 `O(|T|²|C||R|)` 裡的不一致。
+>
+> v3 變更：
+> - P3 Motivation 重寫 —— **bottleneck 就是 exact ILP 的 solver runtime（4.3 h / 19.8 h / >1d）**，不再拿 inter/intra 延遲差當 bottleneck
+> - **Solution 只有兩條**：(1) 區分 inter / intra，(2) 用 TU 性質做 formulation transfer
+> - 引用編號全部改用本 deck 自己的 reference list（P14），不再沿用 Wang 原文的 [9]/[10]/[17]/[30] 等編號
+> - Fig. 1 從 Motivation 移到 P6（Lever 1），它是「為什麼可以先解 chiplet 層」的證據，不是 bottleneck
+> - Step 1 依 **Fig. 9(a) 流程圖**走；原 power-constraint 專頁已刪
+> - 文末 **§A 複雜度推導**是給你自己看的，不是投影片內容
+
+---
+
+## P2 — Outline
+
+```
+Motivation
+Preliminaries — System & Application Model
+Problem Formulation — Why It Is Hard
+Solution ① — Separate Inter- from Intra-chiplet
+Solution ② — Totally Unimodular Constraints → BLP Collapses to LP
+Step 1 Walkthrough (Fig. 9)
+Step 2 — Intra-chiplet Mapping
+Experimental Results
+Conclusion
+Discussion & Limitation
+Future Work
+```
+
+---
+
+## P3 — Motivation
+
+**Current Status**
+- Model scale continues to grow, driving DCIM accelerators to scale from a single chip to 2.5D multi-chiplet systems
+
+**Bottleneck**
+- Exact **MILP** formulations for application-specific NoC synthesis already exist
+- Solver runtime. DVOPD, 32 PEs, 8×4 mesh → **15,381 s ≈ 4.3 h**
+- Root cause: the solution space is **non-convex**, so the solver has to fall back on **branch-and-bound** — worst case **2ⁿ** nodes for `n` binaries
+
+**Solution**
+- **Separate inter- from intra-chiplet.** Assign tasks to chiplets first, to cores second → shrinks the **base** of the exponential
+- **Formulation transfer.** BQP → BLP whose constraint matrix is **totally unimodular** → the LP relaxation is already integral → **one LP solve, no branching, still exact** → turns the **exponent** into a polynomial
+
+**配圖**：論文沒有對應圖。這頁用 runtime 對照表（同 P12 的表，只留前兩列）。
+
+---
+
+## P4 — Preliminaries │ System & Application Model
+
+**System model** — undirected graph `G = (C, L)`
+- Node = core + L1 + L2 slice + router + NI; chiplet `R_j` = a set of such nodes
+- **Interface nodes** `H_j` = cores whose routers connect out to other chiplets — the only way traffic leaves a chiplet
+- Two inter-chiplet organizations: **tiled** (passive interposer) and **centralized** (active interposer)
+
+**Application model** — undirected graph `A = (T, E)`
+- `v(t_i, t_m)` = communication volume on edge; mapping function `M(t_i) = c_kj`
+- Tasks arrive at runtime and are mapped onto free cores → **runtime** mapping, not design-time synthesis
+
+**Thermal power capacity (TPC) model**
+- Extends prior TPC work to multi-chiplet: allowable power `P_th(c_ij)` depends on the power of cores in **four concentric regions** around `c_ij`
+- Regression-fitted offline; enters the algorithm as a hard constraint
+
+**配圖**：**Fig. 2(a)(b)**（tiled vs. centralized）左；**Fig. 3**（four thermal-correlation regions）右，縮小。
+
+---
+
+## P5 — Problem Formulation │ Why It Is Hard
+
+**Objective**
+- Minimize application execution time s.t. `P_c(c_ij) ≤ P_th(c_ij)` for every core
+- Execution time is proxied by total communication latency `C_total` (correlation established in prior work)
+
+**The direct formulation is a BQP**
+- Decision variable `π_im ∈ {0,1}` — "task `t_i` runs on chiplet `R_m`"
+- Cost couples **pairs** of assignments: `q_imjn = v(t_i,t_j) × ω^R(R_m,R_n)` → quadratic objective
+- NP-hard
+
+**Baseline complexity**
+```
+Search space of joint task→core mapping  =  |C|^|T| = (|R|·k)^|T|      (k = cores per chiplet)
+Paper's example: |T|=16 tasks, |R|=4 chiplets, k=4 cores each  →  16¹⁶ ≈ 1.8×10¹⁹
+```
+
+**兩條 solution**（接下來兩頁各一條）
+| | 手法 | 把什麼變小 | 是否仍最優 |
+|---|---|---|---|
+| Solution ① | inter 主宰 intra → 階層式解耦 | 指數的**底數**：`\|R\|·k` → `\|R\|`（除以 k） | 近似（誤差被 intra 距離 bound 住） |
+| Solution ② | constraint matrix 是 TU → LP relaxation | **指數本身**：`exp` → `poly` | **完全最優**（integrality gap = 0） |
+
+**配圖**：無
+
+---
+
+## P6 — Solution ① │ Separate Inter- from Intra-chiplet
+
+**Why the split is legitimate**
+- Crossing a chiplet boundary costs **10–30× more** than a hop inside a chiplet
+- So the total communication cost is dominated by its inter-chiplet part
+- That part depends only on **which chiplet** each task lands on — not on which core inside it
+- ⇒ the dominant cost can be settled **before** any core-level decision is made
+
+**Two stages instead of one**
+- **Stage 1** — task → chiplet: settles the dominant, inter-chiplet cost
+- **Stage 2** — task → core inside its own chiplet: settles the remaining, intra-chiplet cost
+
+**What this buys**
+```
+Before :  every task chooses among ALL cores in the system
+After  :  every task chooses among the CHIPLETS only
+
+           choices per task  ÷=  (cores per chiplet)
+```
+
+**Example — 64 tasks, 16 chiplets, 16 cores per chiplet**
+
+| | choices per task | combinations |
+|---|---|---|
+| Before — one joint problem | 256 cores | 256⁶⁴ ≈ 10¹⁵⁴ |
+| After — Stage 1 | 16 chiplets | 16⁶⁴ ≈ 10⁷⁷ |
+| After — Stage 2 | 16 cores | 16 small independent problems |
+
+**But it is still exponential.** The **number of choices per task** shrank; the **number of tasks in the exponent** did not.
+→ that is what **Solution ②** attacks.
+
+**配圖**：**Fig. 1(a)(b)(c)** — 同一個 task graph，一般 2D/3D mapping 的結果 vs. 先最小化跨 chiplet 流量的結果，communication latency 降到 **0.79×**。這張圖是「為什麼可以先解 chiplet 層」最直觀的證據。
+
+---
+
+## P7 — Solution ② │ Formulation Transfer — Make the Relaxation Exact
+
+**Stage 1 on its own is still an integer problem**
+- Every decision is yes/no: does this task go on this chiplet?
+- The cost depends on **pairs** of decisions — two communicating tasks, and how far apart their chiplets are → the objective is **quadratic**, not linear
+- Solving that exactly means branch-and-bound, and in the worst case every yes/no decision splits into two subproblems
+
+**The constraint matrix is totally unimodular ⇒ solve the BLP by its LP relaxation**
+- Linearize first (one variable per pair) so that there **is** a constraint matrix to talk about — this saves nothing on its own; it squares the variable count
+- Order the variables so that all entries of one chiplet sit together, and all entries of one task sit together → **every row of the matrix becomes a single solid run of 1s**
+- A 0/1 matrix with that shape is **totally unimodular**, which makes every corner of the relaxed feasible region a whole number
+- ⇒ drop the yes/no requirement and solve the **LP relaxation** — the answer comes out **integral by itself**
+- ⇒ **no branching. One solve. Still exact.** ← 縮減完全來自這裡
+
+**Cost accounting — 64 tasks on 16 chiplets**（版面放右側或底部，不算第三大項）
+
+| | |
+|---|---|
+| yes/no variables (task on chiplet) | 1,024 |
+| branch-and-bound, worst case | 2¹⁰²⁴ ≈ 10³⁰⁸ LP solves |
+| after pairing → variables | 1,048,576 |
+| totally unimodular ⇒ | **1** LP solve, cost ≈ (variables)³ ≈ 10¹⁸ |
+
+> 一句話：**它不是把 exact 換成 heuristic，也不是加約束去剪枝，而是把問題整成一個 solver 不需要搜尋的形狀。**
+
+**Caveat**: that single solve runs on the squared variable count, so it is not cheap either. The gain is **qualitative** — exponential in the number of tasks becomes polynomial — and it only pays off once the problem is large enough (roughly 25+ tasks).
+
+**配圖**：**Fig. 4**（變數的排列方式，用來說明為什麼 1 會連成一段）＋ **Fig. 7**（合併後的約束矩陣，一眼看到那個階梯狀的連續 1 結構）。Fig. 5 / Fig. 6 可省。
+
+---
+
+## P8 — Step 1 Walkthrough │ 依 Fig. 9(a) 流程圖
+
+**配圖**：**Fig. 9(a)** 放大置中，講解時逐塊指。**Fig. 9(b)** 放右下角，講 central path 時指。
+
+**Phase 0 — Setup**
+- Build `q` (cost vector, Fig. 8) and `W` (constraint matrix, Fig. 7)
+- Form the **LPR** (Eq. 18–19), then convert primal → **dual (DP)** to speed convergence
+- Add the log-barrier `μ Σ ln s_i` → unconstrained problem (Eq. 23–24)
+- Initialize `(π^P)⁰, (π^D)⁰, s⁰` (Eq. 25)
+
+**Phase 1 — Interior point iterations** ← 流程圖的主迴圈
+- **Step 1.1** compute search directions `d_(π^P)ᵏ, d_(π^D)ᵏ, d_sᵏ` (Eq. 26)
+- **Step 1.2** update intermediates: penalty `pᵏ = (Π^Pᵏ)⁻¹ fᵏ`, matrix `D̂ᵏ = Π^Pᵏ S⁻¹ᵏ`
+- update step sizes `β_P, β_D` with `α = 0.99` (Eq. 27–28), then update the solution (Eq. 29)
+- **optimality measure** `μᵏ = ((π^P)ᵏ)ᵀ sᵏ / |π^P|` — how far along the central path we are
+- **Condition 1** → optimal, stop. **Condition 2/3** → unbounded/infeasible. Otherwise `k ← k+1`, loop.
+
+**Phase 2 — Power repair** ← 流程圖右半
+- **Step 2.1** identify over-budget chiplets `R^P = {R_i | P_c(R_i) > P_th(R_i)}`
+- **Step 2.2** sort tasks in `R_i` by power descending; swap the highest-power task with a task in the nearest chiplet set `R^C = argmin ω^R(R_i,R_p)`, choosing the swap that minimizes `E = α·C_total + β·Σ P_c(R_i)`
+- iterate until every chiplet satisfies the power constraint
+
+> 講解重點：**Phase 1 才是這篇的貢獻，Phase 2 只是把 LP 沒管的熱約束修回來的貪心迴圈。**
+> Fig. 9(b) 那條曲線就是 central path —— interior point 從可行域內部往最優頂點收斂，
+> 而因為 W 是 TU，那個頂點保證是整數點，所以不需要再做任何 rounding 或 branching。
+
+---
+
+## P9 — Step 2 │ Intra-chiplet Task Mapping
+
+**Two special core classes inside a chiplet**
+- **Center nodes** — geometric center, most free neighbours → for tasks with heavy *intra*-chiplet traffic
+- **Interface nodes** — connect out to other chiplets → for tasks with heavy *inter*-chiplet traffic
+
+**Priority metric**
+```
+z_i = (Σ intra-chiplet volume of t_i + 1) / (Σ inter-chiplet volume of t_i + 1)
+```
+- high `z_i` → intra-dominated; low `z_i` → inter-dominated; `+1` avoids division by zero
+- sort descending into queue `Z_c`
+
+**Mapping loop — greedy from both ends of `Z_c`**
+- **head** (highest `z_i`) → free core near the chiplet's **geometric center**; tie-break by most free neighbours
+- **tail** (lowest `z_i`) → free core near an **interface node**
+- if some communicating partners are already placed, minimize partial intra-chiplet latency to them instead
+- power check after each placement; DVFS down if violated
+
+**Complexity**: `O(|T| log|T|)` sort + `O(|T|²·|C|·|R|)` mapping
+
+> 注意這裡與 Step 1 的**不對稱**：Step 1 是 exact（TU 保證），Step 2 是 **heuristic**，沒有最優性保證。
+> 論文的最優性宣稱只涵蓋 chiplet 層。
+
+**配圖**：論文沒有 Step 2 流程圖。建議自畫一張 chiplet 內部示意（center / interface 兩色，兩支箭頭從 `Z_c` 頭尾指過去）。
+
+---
+
+## P10 — Experimental Setup
+
+**Simulation**
+- Event-driven C++ platform; flit 128 bits, XY routing intra- and inter-chiplet, 4-flit buffers
+- Intra-chiplet: router 2 cycles + link 1 cycle; inter-chiplet: router 2 cycles
+- Intra-chiplet mesh 4×4 → 24×24; inter-chiplet mesh 4×4 (tiled) or centralized
+
+**Platforms / workloads**
+- x86 multi-chiplet simulator + PARSEC / SPLASH-2 (Barnes, Blackscholes, Canneal, Dedup, Ferret, Fluidanimate, Freqmine)
+- SIMT multi-chiplet simulator + **ResNet-50, YOLOv3, Transformer, GCN**
+- COMET interposer config: 2500 mm², 1.17 pJ/bit inter-chiplet transmission energy
+
+**Baselines**: **DAR** [4] (dynamic dark-core allocation) · **IOA** [5] (multi-objective PSO)
+
+**配圖**：**Table II** 為主，**Table III** 小字。Table IV/V 略過或一句帶過。
+
+---
+
+## P11 — Results
+
+- Application execution time reduced by up to **37.5%** vs. DAR, **24.7%** vs. IOA
+- Communication latency reduced by up to **43.2%** vs. DAR, **32.9%** vs. IOA
+- Consistent across 4×4 → 24×24 and across both PARSEC and NN workloads
+- Gains grow with system size — consistent with the win coming from cutting chiplet crossings
+
+**配圖**：**Fig. 11(a)(b)**（ResNet-50）主圖；**Fig. 12** 備用。
+
+> ⚠️ Abstract/Conclusion 寫 **37.5% / 24.7%** 與 **43.2% / 32.9%**；Introduction 同一組寫成 **33.5% / 21.1%** 與 **39.0% / 25.8%**。論文本身前後不一致，報告時建議用 Abstract 的數字並口頭帶一句。
+
+---
+
+## P12 — Runtime Overhead │ 相對 ILP 方法的關鍵主張
+
+- Method run 100× under varying parameters
+- Average PARSEC application execution time ≈ **3 billion cycles**
+- Average mapping algorithm execution time ≈ **76 million cycles** → **2.53%**
+- Priority determination is only ~1.6% of the mapping time
+
+| Work | Decision variables | Solver | Runtime |
+|---|---|---|---|
+| S. Liu & Radetzki, MCSoC'23 | mapping + routing | ILP (exact) | DVOPD 32 PEs: **15,381 s ≈ 4.3 h** (mesh) / 24,297 s (torus) / 12,267 s (hex) |
+| Radetzki, MCSoC'25 | mapping + routing + scheduling | MILP (exact) | VOPD 4×4: **19.8 h**; DVOPD: **> 1 day** |
+| **Wang TC'25** | task→chiplet, then task→core | **LP (TU ⇒ exact) + heuristic** | **2.53% of application runtime** |
+
+---
+
+## P13 — Conclusion
+
+**Mapping quality**
+- **37.5% / 24.7%** shorter application execution time than DAR / IOA
+- **43.2% / 32.9%** lower communication latency than DAR / IOA
+- Consistent from 4×4 up to 24×24, on both PARSEC and NN workloads
+
+**From offline synthesis to online mapping — without giving up exactness**
+- Exact MILP-based NoC synthesis is an **offline** step: 4.3 h for 32 PEs, over a day once scheduling is included
+- Here the chiplet-level assignment is solved exactly by **a single LP relaxation**: ~76 M cycles ≈ **25 ms at 3 GHz**, i.e. **2.53%** of a ~3 billion-cycle application
+- ⇒ the optimization can run **at runtime**, every time an application arrives — not once at design time
+- ⇒ **exactness is kept where it matters**: the chiplet-level assignment is provably optimal; only the core-level placement is heuristic
+
+**Thermal / power stays inside the loop**
+- After the LP: any chiplet over its power cap swaps its **highest-power task** with a task in the **nearest** chiplet, picking the swap that costs the least extra communication; repeat until every chiplet is under cap
+- Inside a chiplet: if a core still violates its cap, its **voltage/frequency is scaled down (DVFS)**
+- ⇒ the runtime speed is not bought by ignoring thermal limits
+
+> ⚠️ 講「快了幾個數量級」時要誠實標注：25 ms vs 15,381 s 大約是 **6×10⁵ 倍**，但兩者的**決策變數集合與 benchmark 都不同**
+> （Radetzki 那條線解 mapping + routing + scheduling on a task graph；這篇解 task→chiplet + task→core）。
+> 這個數字說明的是**從 offline 走到 online 的體制轉變**，不是同題比較的 speedup。口頭上帶一句就好。
+
+**配圖**：無，或把 P12 的三列對照表再放一次。
+
+---
+
+## P14 — Discussion │ 這篇對我的題目說明了什麼
+
+**兩個可移植的手法**
+1. **Hierarchical decoupling justified by a physical gap** — 因為 inter/intra 差 10–30×，先在 chiplet 層解、再在 core 層解，損失的最優性被 intra 距離 bound 住。我的題目 workload 是 DNN inference 而非 general task graph，相依結構更強，解耦的合法性需要另外論證。
+2. **Reformulate until the solver doesn't have to search** — TU 不是加速 B&B，是讓 B&B 消失。
+
+**質疑 / Limitation**
+- **Eq. (15) 的約束方向有問題**：`min Σ q·π^P` 中 `q ≥ 0`，而所有約束都是 `≤`，則 `π^P = 0` 可行且最優 → 印出的 BLP 是退化的。assignment 那條應為**等號**。此外正文未列 `π^P_imjn = π_im·π_jn` 的 linking constraints（McCormick），BLP 與 BQP 的等價性沒有被建立。
+- **多項式 ≠ 便宜**：`O((|T||R|)⁶)`。|T|=64、|R|=16 時 `n ≈ 10⁶`、`n³ ≈ 10¹⁸`，與 2.53% overhead 對不上（見 §A.4 的和解）。
+- **Cost model 只看網路端**：`ω^R` 是靜態 chiplet 間延遲，沒有 congestion、contention、bandwidth 上限。
+- **Workload 假設**：general task graph，任務間只有 volume。DNN 的 layer 相依、weight-stationary reuse、pipeline 結構都沒進 model。
+
+---
+
+## P15 — Future Work
+
+- Investigate whether the constraint matrix of the deadlock-free mapping + routing ILP [6] can be reshaped into a **totally unimodular** form, so the exact optimum comes out of **one LP solve** instead of hours of branch-and-bound
+
+---
+
+<details><summary>講稿備忘（不上投影片，被問到再答）</summary>
+
+**為何可能**：routing 的核心是 flow 問題，per-flow 的 link-selection 約束是 node–arc incidence matrix，本身就是 TU。
+
+**什麼破壞 TU**（一定要能答，不然會被認為沒做功課）
+- multi-commodity coupling：flows 共用 link 頻寬，整數多商品流本身就 NP-hard —— 還沒碰 deadlock 就已經不是 TU
+- turn indicator：兩個 routing binary 的乘積，線性化後的列不是連續 1
+- link-numbering（deadlock）：對一般整數 link number 的 indicator / big-M 形式，鬆弛極鬆
+- bandwidth 約束：以流量加權，矩陣根本不是 0/1
+
+**可嘗試的方向**
+- 分塊：保留 TU 的 flow block，把 coupling + deadlock 列移出去，用 Lagrangian relaxation / Dantzig–Wolfe，子問題就是可精確解的 TU shortest-path LP
+- 把 deadlock-free 改成**定義域限制**（forbidden turns）而非排序約束，那些列直接離開矩陣 —— 代價是失去 [6] 刻意保留的 routing 自由度
+- 退一步求「更緊」而非「完全整數」：可證更緊的 relaxation 一樣能縮小 B&B 樹
+
+**成功判準**：與 [6] 相同的最優成本，32-PE DVOPD 的 solver runtime 從 4.3 h 掉到秒～分鐘等級。
+
+</details>
+
+---
+
+## P16 — Reference
+
+```
+[1]  X. Wang, Y. Wang, Y. Jiang, A. K. Singh, and M. Yang, "On Task Mapping in Multi-chiplet
+     Based Many-Core Systems to Optimize Inter- and Intra-chiplet Communications,"
+     IEEE Trans. Comput., vol. 74, no. 2, pp. 510–523, Feb. 2025.
+[2]  M. Fattah et al., "CoNA: Dynamic application mapping for congestion reduction in
+     many-core systems," ICCD, 2012, pp. 364–370.
+[3]  D. D. Sharma, G. Pasdast, Z. Qian, and K. Aygun, "Universal Chiplet Interconnect Express
+     (UCIe)," IEEE Trans. Compon. Packag. Manuf. Technol., vol. 12, no. 9, pp. 1423–1431, 2022.
+[4]  X. Huang et al., "Dynamic allocation/reallocation of dark cores in many-core systems,"
+     IEEE Access, vol. 8, pp. 165693–165707, 2020.  (DAR)
+[5]  M. Darbandi et al., "Tasks mapping in the network on a chip using an improved
+     optimization algorithm," IJPCC, vol. 16, no. 2, pp. 165–182, 2020.  (IOA)
+[6]  S. Liu and M. Radetzki, "Systematic Construction of Deadlock-Free Routing for NoC Using
+     Integer Linear Programming," MCSoC, 2023.
+[7]  M. Radetzki, "Pipelined Scheduling and Communication Synthesis for Application-Specific
+     NoCs," MCSoC, 2025.
+```
+
+---
+---
+
+# §A 複雜度推導 — 完整教學（不是投影片內容）
+
+## A.1 先備知識：為什麼整數規劃貴，而線性規劃便宜
+
+**LP（線性規劃）**：`min cᵀx s.t. Ax ≤ b, x ≥ 0`。可行域是一個**多面體（polyhedron）**。
+- 關鍵事實 1：線性目標在多面體上的最優值，一定在**頂點（vertex）**取到。
+- 關鍵事實 2：頂點 ⇔ **basic feasible solution**。把 `Ax ≤ b` 加 slack 寫成 `[A|I]x̄ = b`，選一組 `m` 個線性獨立的行構成非奇異方陣 `B`（basis），則 `x_B = B⁻¹b`，其餘變數設 0。
+- 所以 LP 可以在多項式時間解（ellipsoid / interior point），實務上 interior point 每次迭代解一個線性系統。
+
+**ILP（整數規劃）**：加上 `x ∈ ℤ`。
+- 難點不在目標或約束，而在 `B⁻¹b` **通常不是整數**。LP relaxation 解出來是分數的。
+- 分數解與整數最優解之間的差距叫 **integrality gap**。
+- **Branch-and-bound** 就是為了消除這個 gap：拿一個分數變數 `x_j = 0.6`，分岔成 `x_j ≤ 0` 和 `x_j ≥ 1` 兩個子問題，各解一次 LP，遞迴下去。
+- 最壞情況要展開 `2ⁿ` 個節點，**這裡的 `n` 是被 branch 的那組二元變數的個數** —— 在 Step 1 就是 `n = |T|·|R|`（每個 `π_im` 都可能被分岔一次）。每個節點解一次 LP。**這就是 ILP 貴的來源。**
+- 注意：`2ⁿ` 是把所有 0/1 組合都算進去的鬆界。加上「每個 task 只能在一個 chiplet」的約束後，可行解只有 `|R|^|T|` 個 —— 這才是比較有意義的 brute-force 基準。
+
+**先拆開 "branch" 和 "bound" 兩個字。**
+
+- **Branch（分支）**：拿一個 LP 解出來是分數的變數 `x_j = 0.6`，切成兩個子問題 `x_j ≤ 0` 與 `x_j ≥ 1`。整數解一定落在其中一邊，所以不會漏解。
+- **Bound（定界）**：對每個節點算出「這棵子樹最好可能多好」，用來決定要不要繼續挖。有兩種界：
+  - **Lower bound（對 min）** = 該節點 LP relaxation 的最優值。因為 relaxation 把整數條件丟掉、可行域**變大**，所以它的最優值一定 **≤** 該子樹裡任何整數解的值 → 是合法的下界。
+  - **Upper bound** = **incumbent**，目前已經找到的最好**整數**解的值。
+  - **剪枝規則**：若某節點的 lower bound **≥** incumbent，這棵子樹裡不可能有更好的整數解 → 整棵砍掉，連看都不看。
+
+> 沒有 bound 的話，B&B 就退化成窮舉。**bound 才是它能比暴力快的唯一理由。**
+> 順帶一提，`(incumbent − 剩餘節點最小 lower bound) / incumbent` 就是 solver 回報的 **optimality gap**，
+> 這也是為什麼 ILP solver 可以在中途停下來並告訴你「我現在最差就差 1%」—— Liu & Radetzki'23 Table III
+> 那個「600 s 時 gap 5.87%、2 h 時 0%」的表，探討的就是這件事。
+
+---
+
+**「為何一定會分支？」 —— 其實不一定。這正是整篇的關鍵。**
+
+用幾何來看：
+
+```
+S        = 所有整數可行點（有限個離散點）
+conv(S)  = 這些整數點的凸包  ← 「理想」的表述
+P_LP     = {x : Wx ≤ b, 0 ≤ x ≤ 1}  ← 你實際寫出來的 LP 可行域
+
+一定有  P_LP ⊇ conv(S)
+```
+
+- LP 的最優值落在 `P_LP` 的**某個頂點**上。
+- 若 `P_LP` **嚴格大於** `conv(S)`，那些多出來的頂點就是**分數點** → LP 解出分數 → **必須分支**。
+- 分支的本質是**修補**：`x_j = 0.6` 對整數解不可能成立，切掉它，得到兩個更緊的子問題，遞迴下去直到每個節點的 LP 都是整數。
+
+**什麼時候不用分支？** 當 `P_LP = conv(S)`，也就是**每個頂點本身就是整數點**的時候。
+**TU + 整數 b 正好就是這件事的充分條件**（推導見下一節）。
+
+```
+一般 ILP :  P_LP ⊋ conv(S)   →  根節點就是分數解  →  要分支，樹會長大
+TU 的情況 :  P_LP = conv(S)   →  根節點 LP 直接是整數解  →  分支次數 = 0
+```
+
+> 這也解釋了為什麼 ILP 圈子在意「**tight / strong formulation**」：
+> 一個表述好不好，不是看變數少不少，而是看 `P_LP` 離 `conv(S)` 多近。
+> Radetzki Eq. 18 的單調性約束 `γ_fgi ≥ γ_fg(i+1)` 就是在做這件事 —— 砍掉分數區域但不砍掉任何整數點，
+> 讓 `P_LP` 變緊、樹變小。而 big-M 型的 disjunctive constraint（non-overlap 就是典型）出了名的 `P_LP` 很鬆，
+> 這正是他那篇跑到 19.8 h 的結構性原因。
+
+---
+
+**B&B 不是把所有二元變數都掃過一遍。** 它的實際運作是：
+
+1. 解**根節點**的 LP relaxation。若解出來已經是整數 → 直接就是最優解，樹只有一個節點，結束。
+2. 若是分數解，**只挑其中一個分數變數** `x_j` 分岔成 `x_j = 0` 與 `x_j = 1` 兩個子問題。**LP 已經解成 0 或 1 的變數不會被分岔。**
+3. 每個節點解一次 LP → 得到該子樹的 **lower bound**（對 min 而言）。同時維護 **incumbent**（目前找到最好的整數解）→ **upper bound**。
+4. **剪枝**：LP bound ≥ incumbent（bound pruning）、LP 不可行、或 LP 解已是整數（該子樹到此為止）。
+
+所以實務上探索到的節點數遠小於 `2ⁿ`。`2ⁿ` 是**剪枝完全不生效**時的退化情形 —— 深度 `n` 的完全二元樹。
+（同一個變數可以在不同分支上被分岔多次；但單一條路徑上深度 ≤ `n`，因為每分一次就固定一個變數。）
+
+**真正決定樹大小的是 LP relaxation 有多緊，也就是 integrality gap。**
+- gap 大 → LP bound 弱 → bound pruning 很晚才生效 → 樹爆炸
+- gap = 0 → 根節點 LP 就是整數解 → **樹只剩根節點**
+
+這就是 TU 的位置：它不是「更好的剪枝」，而是把 gap 直接壓到 0，讓樹**根本長不出來**。
+
+> **對照 Radetzki MCSoC'25 §V-E（Model Reduction）**：他自己也很清楚問題在這裡，原文寫
+> "ILP solvers determine optimal values for boolean variables with a branch-and-bound search in a binary
+> decision diagram of exponential worst-case size"，而且指出複雜度主要來自 non-overlap constraints 的
+> choice variables `γ_fg`, `γ_cd`。他的對策有兩種：
+> (a) **消變數**（利用對稱性 `ord(f) < ord(g)`、利用傳遞閉包 `C*` 移除不可能重疊的 pair）→ 縮小 `n`；
+> (b) **加緊約束**（Eq. 18 的單調性 `γ_fgi ≥ γ_fg(i+1)`）→ 原文說 "does not eliminate variables but
+> constrains them in a stronger way so that a smaller solution space is left to be explored by the solver"。
+>
+> 這兩招都是**在同一棵樹上做文章**（讓樹小一點）。Wang 的 TU 是**換一個不需要樹的形狀**。
+> 你原本想的「加 turn-model constraint 縮小 B&B 搜尋空間」屬於 (b) 那一類，跟 TU 不是同一個層級的攻擊。
+
+> 這也正是 Radetzki MCSoC'25 跑到 19.8 h、Liu & Radetzki MCSoC'23 跑到 4.3 h 的原因：
+> 不是 LP 慢，是 B&B 的樹太大。
+
+## A.2 TU 為什麼能讓 gap 變成 0
+
+**定義（Totally Unimodular）**：矩陣 `A` 的**每一個方形子矩陣**的行列式都 ∈ {0, +1, −1}。
+
+推導鏈（四步，每步都只用線性代數）：
+
+1. 頂點 = `x_B = B⁻¹b`，`B` 是約束矩陣（含 slack）的某個非奇異方形子矩陣。
+2. **Cramer 法則**：`B⁻¹ = adj(B) / det(B)`。`adj(B)` 的每個元素是 `B` 的 cofactor，也就是更小的子矩陣的行列式 —— 只要 `B` 是整數矩陣，`adj(B)` 就是整數矩陣。
+3. 若 `A` 是 TU，則任何 basis `B` 都滿足 `det(B) = ±1`（非奇異排除了 0）。於是 `B⁻¹ = ±adj(B)` 是**整數矩陣**。
+4. `b` 是整數向量（這裡 `b = 2×(|R₁|,…,|R_|R||, 1,…,1, 0,…,0)ᵀ`，確實是整數）⇒ `x_B = B⁻¹b` 是**整數向量**。
+
+結論：**TU + 整數 b ⇒ 多面體的每一個頂點都是整數點。**
+⇒ LP relaxation 的最優解本身就是整數解 ⇒ **integrality gap = 0** ⇒ **一次 LP 就結束，不用 branch。**
+
+**怎麼證 W 是 TU？** 論文用一個充分條件：
+- **Definition 1（consecutive 1's property）**：每一列都長成 `(0,…,0,1,…,1,0,…,0)`，1 連成一段。
+- **Theorem 1**：具 consecutive 1's property 的 0/1 矩陣是 TU。（這類矩陣叫 **interval matrix**；證明可用 Ghouila-Houri 判準，或視為 network matrix 的轉置。論文把證明丟到 supplementary §I。）
+- **為什麼 W 有這個性質**：Fig. 4 對 `π^P` 的排列刻意讓「屬於同一個 chiplet `R_m` 的變數」與「屬於同一個 task `t_i` 的變數」各自連續。於是 capacity 那幾列的 1 是一段、assignment 那幾列的 1 也是一段。
+
+> ⚠️ 一個要小心的地方：**TU 對矩陣加法不封閉**。論文寫 `W = W₁ + W₂` 然後宣稱 W 是 TU，這在一般情況下是不成立的推論。
+> 這裡能過關只是因為 `W₁` 的非零列（前 `|R|` 列）與 `W₂` 的非零列（接下來 `|T|` 列）不重疊 —— 那個「加法」其實是**列串接（row stacking）**，不是真的相加。
+> 報告時可以指出這個表述上的鬆散。
+
+## A.3 複雜度前後對照（完整版）
+
+符號：`|T|` 任務數、`|C|` 全系統核心數、`|R|` chiplet 數、每個 chiplet 有 `|C|/|R|` 核心。
+
+### (0) 基準：joint task→core mapping
+```
+搜尋空間 = |C|^|T|
+exact 解 = BQP，NP-hard；B&B on |T|·|C| binaries → 最壞 2^(|T||C|) 節點
+```
+
+### (1) 套上 Solution ①（解耦）
+```
+記 k = |C|/|R| = 每個 chiplet 的核心數
+
+Before :  每 task 選 |R|·k 個核心   →  變數 |T|·|R|·k ，搜尋空間 (|R|·k)^|T|
+Step 1 :  每 task 選 |R|   個chiplet →  變數 |T|·|R|   ，搜尋空間 |R|^|T|
+Step 2 :  |R| 個獨立子問題，每個 k^(|T|/|R|)
+
+底數：|R|·k  →  |R|        （縮小 k 倍，k = 每 chiplet 核心數）
+變數：|T||R|k →  |T||R|     （同樣縮小 k 倍）
+```
+| \|T\| | \|R\| | k | joint | Step1 | Step2 | 合計 | 倍率 |
+|---|---|---|---|---|---|---|---|
+| 16 | 4 | 4 | 1.8×10¹⁹ | 4.3×10⁹ | 1.0×10³ | 4.3×10⁹ | ~4.3×10⁹ |
+| 32 | 4 | 16 | 6.3×10⁵⁷ | 1.8×10¹⁹ | 1.7×10¹⁰ | 1.8×10¹⁹ | ~3.4×10³⁸ |
+| 64 | 16 | 16 | 1.3×10¹⁵⁴ | 1.2×10⁷⁷ | 1.0×10⁶ | 1.2×10⁷⁷ | ~1.2×10⁷⁷ |
+
+> ⚠️ 符號警告：論文的 `|C|` 在正文定義是**全系統核心集合**，但 Step 2 的複雜度寫成 `O(|T|²|C||R|)`
+> —— 如果 `|C|` 真是全系統核心數，那再乘一次 `|R|` 是重複計數。這裡的 `|C|` 應該是**每個 chiplet 的核心數**（即上面的 `k`）。
+> 論文沒有澄清，讀的時候要自己分辨。
+
+**但仍是指數。** `|R|^|T|` 的階沒有變 —— Solution ① 只把底數除以 `k`，沒有動到指數。
+
+### (2) 再套上 Solution ②（TU ⇒ LP）
+
+**兩個 `n` 不要混淆：**
+```
+n = |T|·|R|          BQP 的二元變數數（π_im）      ← 2ⁿ 裡的 n 是這個
+N = n² = (|T||R|)²   BLP 線性化後的變數數（π^P）    ← N³ 裡的 N 是這個
+```
+
+```
+Before : B&B over the n binaries  →  最壞 O(2ⁿ) 個節點 × 每節點一次 size-n LP
+         （可行解列舉基準：|R|^|T|）
+After  : TU ⇒ 0 次 branch  →  1 次 size-N LP
+         primal-dual interior point : O(N³) = O(n⁶) = O((|T|·|R|)⁶)
+```
+| \|T\| | \|R\| | n | 2ⁿ | \|R\|^\|T\| | N = n² | N³ | vs 可行列舉 |
+|---|---|---|---|---|---|---|---|
+| 16 | 4 | 64 | 1.8×10¹⁹ | 4.3×10⁹ | 4,096 | 6.9×10¹⁰ | ✗ 反而慢 16× |
+| 24 | 4 | 96 | 7.9×10²⁸ | 2.8×10¹⁴ | 9,216 | 7.8×10¹¹ | ✓ ~360× |
+| 32 | 4 | 128 | 3.4×10³⁸ | 1.8×10¹⁹ | 16,384 | 4.4×10¹² | ✓ ~4×10⁶ |
+| 64 | 16 | 1024 | ~10³⁰⁸ | 1.2×10⁷⁷ | 1,048,576 | 1.2×10¹⁸ | ✓ ~10⁵⁹ |
+
+**要教會你的重點**：
+- 質的改變是 **exponential → polynomial**（`|R|^|T|` → `(|T||R|)⁶`），而不是常數倍加速。
+- 但那個 polynomial 的**次數是 6**，所以在小規模（`|T| ≲ 24`）反而比暴力慢。**交叉點大約在 |T| ≈ 24–28（|R|=4）。**
+- 這正好對上你自己的題目：exact 方法真正的價值不在小規模，而在規模上去以後才顯現。（注意瓶頸是**問題規模**，不是 topology —— [6] 在 mesh / torus / hexagonal 上同樣爆掉。）
+
+### (3) Step 2
+```
+暴力：Π_j (|C|/|R|)^(|T_j|)              ← 指數
+本文：O(|T| log|T|) 排序 + O(|T|²·|C|·|R|) 映射   ← 多項式，但是 heuristic
+```
+
+### (4) 總計
+```
+O((|T|·|R|)⁶)  +  O(|T|²·|C|·|R|)     ← 由 Step 1 主導
+```
+
+## A.4 那 2.53% overhead 是怎麼可能的？（論文沒講，但你應該知道）
+
+`|T|=64, |R|=16` 時 `n³ ≈ 10¹⁸`，跟量到的 76M cycles 差了十個數量級。三個和解點：
+
+1. **`O(n³)` 是 dense 的界。** interior point 每次迭代解一個 `n×n` 線性系統，dense LU 才是 `n³`。`W` 是 interval matrix，每列非零元是一段連續 1，**極度稀疏且有帶狀結構**，sparse Cholesky 的成本遠低於 `n³`。
+2. **`(|T||R|)²` 是上界，不是實際變數數。** `π^P_imjn` 只在 `v(t_i,t_j) > 0` 且 `m ≠ n` 時才有意義（`ω^R(R_m,R_m) = 0`，`q_imjn = 0` 的變數可以直接刪掉）。task graph 是稀疏的，`|E| = O(|T|)`，所以
+   ```
+   n_eff ≈ 2·|E|·|R|·(|R|−1)     而非   |T|²|R|²
+   |T|=64, |E|=100, |R|=16  →  n_eff ≈ 4.8×10⁴  （不是 10⁶）→  n³ ≈ 10¹⁴
+   ```
+   還是大，但差了 10⁴ 倍。
+3. **迭代次數**：barrier method 的迭代數是 `O(√n log(1/ε))`，論文的 `O(n³)` 把迭代數折成常數了，這是個鬆散的寫法。
+
+> 報告時可以這樣講：「論文宣稱的 `O(|π^P|³)` 是把 dense 因式分解當作每次迭代成本、迭代數當常數的鬆散上界。
+> 實際能跑到 2.53% overhead，靠的是 W 的稀疏性與 interval 結構，但論文沒有交代這一點。」
+> 這是一個你能對這篇提出、而且站得住腳的技術評論。
+
+
+---
+---
+
+# §B Intra-chiplet Task Mapping — 最簡單的講法
+
+**問題**：Step 1 已經決定「哪些 task 在哪一顆 chiplet」。現在要決定「在這顆 chiplet 裡，每個 task 放哪一個 core」。
+
+**先看棋盤上有哪兩種好位置**
+- **中心的 core**：空鄰居最多，離 chiplet 內其他 core 平均最近
+- **介面 core（interface node）**：連出去到別顆 chiplet 的出入口
+
+**直覺**
+- 一個 task 主要跟**同一顆 chiplet 內**的同伴講話 → 放**中心**，離大家都近
+- 一個 task 主要跟**別顆 chiplet** 的 task 講話 → 放**介面 core**，出去的路最短
+
+**怎麼判斷是哪一種？算一個比值**
+```
+z = (跟同 chiplet 內同伴的通訊量 + 1) / (跟其他 chiplet 的通訊量 + 1)
+
+z 大 → 內向型 → 中心
+z 小 → 外向型 → 介面
+（分子分母各 +1，是為了避免某個 task 完全沒有對外通訊時除以零）
+```
+
+**演算法（貪心，從佇列兩端往中間吃）**
+1. 把這顆 chiplet 的 task 按 `z` 由大到小排成一個佇列
+2. 每一輪從**兩端各取一個**：
+   - **隊頭**（`z` 最大，最內向）→ 放到**中心附近**的空 core
+   - **隊尾**（`z` 最小，最外向）→ 放到**介面附近**的空 core
+3. 但如果這個 task 的通訊對象**已經放好了**，就不用「中心／介面」這個粗略規則，直接放在**離那些對象最近**的空 core
+4. 位置平手時，選**空鄰居最多**的那個 core（把好位置留給後面的 task）
+5. 放完檢查功耗，超標就把該 core **降頻降壓（DVFS）**
+
+**為什麼要從兩端取？**
+中心與介面是兩種**稀缺的好位置**。先讓需求最極端的兩個 task 各自占住自己最需要的那種位置；剩下的 task 需求沒那麼極端，放哪裡的損失都小。這是典型的貪心策略 —— **沒有最優保證**，跟 Step 1 的 exact 形成對比。
+
+**複雜度**：排序 `O(|T| log|T|)` + 映射 `O(|T|²·|C|·|R|)`
+
+> ⚠️ 論文的一個筆誤：正文先說 "the head task in Zc, i.e., the one with the **highest** zi value, is mapped to a core close to the geometric center"，
+> 但下一段 Step 1 又寫成 "The head task ti, which has the **lowest** zi value"。前後矛盾，依語意應為 **highest**。
+
+---
+
+## 附：power constraint 到底在哪一層做（容易搞混）
+
+論文有**兩個**不同的功耗機制，在**兩個不同的階段**：
+
+| 階段 | 層級 | 做法 |
+|---|---|---|
+| **Step 1 之後**（chiplet assignment 的修補迴圈） | chiplet 之間 | 超標的 chiplet 挑出**功耗最高的 task**，跟**最近的鄰居 chiplet** 裡的某個 task **對調**，挑「多付的通訊成本最小」的那組；反覆直到每顆 chiplet 都低於自己的上限 |
+| **Step 2 之中**（intra-chiplet mapping） | 單一 core | 放完某個 task 後若該 core 超過功耗上限，**降頻降壓（DVFS）** |
+
+**注意兩件事：**
+1. 交換是**跨 chiplet** 的（把 task 搬去別顆），**不是**在同一顆 chiplet 內部調位置 —— 在同一顆內部換位置不會改變那顆 chiplet 的總功耗。
+2. 目標**不是把各 chiplet 的功耗拉平均**，而是讓**每一顆都低於它自己的熱功耗上限** `Pth(Ri)`。這個上限每顆不一樣（取決於周圍四個熱關聯區域的功耗），所以「平均」既不是目標也不一定可行。

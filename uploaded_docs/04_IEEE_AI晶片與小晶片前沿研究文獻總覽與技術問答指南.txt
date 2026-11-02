@@ -1,0 +1,62 @@
+# IEEE AI 晶片、小晶片 (Chiplet) 與數位存算一體 (DCIM) 前沿研究核心導讀與架構指南
+
+本文件統整了下世代邊緣與伺服器端高效能深度學習加速器（DNN Accelerators）的前沿 IEEE 頂尖期刊與會議論文精華（包括 IEEE TC、HPCA、MICRO、JSSC、TCAS 等），旨在作為 AI 硬體架構工程師與晶片研發人員之檢索知識庫。
+
+---
+
+## 一、核心研究主題與技術脈絡
+
+### 1. 數位存算一體（Digital Compute-In-Memory, DCIM）
+- **核心挑戰**：傳統馮紐曼架構（Von Neumann Architecture）中處理器與記憶體分離，記憶體牆（Memory Wall）導致大模型推論中高達 60%~80% 的能耗浪費在資料搬移（Data Movement）上。
+- **DCIM 原理**：在 SRAM 記憶體巨集（Macro）或 Subarray 內部直接整合數位邏輯運算單元（如布林邏輯、乘累加 MAC、雙位元序列化運算等），達成高吞吐、低能耗的矩陣乘法。
+- **代表論文精華**：
+  - **Sun et al. (IEEE TCAS-I 2024)**：針對 MLPerf Mobile 工作負載，探討數位 CIM 加速器的排程與資料流。
+  - **Chauvaux et al. (IEEE JSSC 2025)**：提出事件驅動（Event-based）數位存算一體加速器，支援靈活的 Output-Stationary (OS) 與 Weight-Stationary (WS) 數據流。
+  - **Dengfeng Wang et al. (IEEE JSSC 2026)**：全數位異質 CIM 晶片，結合 Dual-Bit Serialization 序列化乘累加技術，大幅壓降面積與動態功耗。
+  - **TriCIM (2026)**：CIM 容量感知（Capacity-Aware）排程架構，針對模型、層級與 Tile-Stationary 混合數據流進行跨層探索，避免 SRAM 容量超出引發的巨額乒乓快取搬移。
+
+### 2. 小晶片與多晶片模組（Multi-Chiplet / Multi-Chip-Module, MCM）
+- **核心挑戰**：後摩爾定律時代，單晶片單晶粒（Monolithic SoC）面積受限於光罩極限（Reticle Limit，約 858 mm²），且晶粒越大良率（Yield）呈指數級下降。Chiplet 技術將大型 SoC 解構為多個小晶粒，透過 2.5D/3D 先進封裝（如 CoWoS, EMIB, Silicon Interposer）連接，以高良率重構超大規模計算系統。
+- **代表論文精華**：
+  - **Simba (MICRO 2019, Yakun Sophia Shao et al.)**：引領業界的 36 晶片 MCM 深度學習推論架構，提出跨 Chiplet 的非均勻記憶體存取與分散式權重映射。
+  - **Wang et al. (IEEE Trans. Computers 2025, Wang TC'25)**：提出基於兩階段二進位二次規劃（BQP）的多晶片多核心任務映射（Task Mapping），將神經網路層間通訊流量局域化於 Chiplet 內部，最小化昂貴的 D2D（Die-to-Die）通訊開銷。
+  - **Lv, Ge, Zhou (A Task Allocation Method for Chiplet-Based CNN Accelerators)**：針對 Chiplet CNN 加速器的工作負載分配與 Interconnect 拓撲感知映射，兼顧計算負載平衡與封裝互連延遲。
+  - **FSMA (2026)**：細粒度層間流水線（Interlayer Pipelining）調度與晶片映射協同探索框架，解決多小晶片系統的空閒氣泡（Idle Bubbles）。
+
+### 3. 晶圓級晶片（Wafer-Scale Chips, WSC）與張量分割
+- **核心架構**：以 Cerebras WSE（Wafer Scale Engine）為代表，將整片晶圓作為單一巨型晶片，擁有數十萬個 PE（Processing Element）與超高速片上 2D-Mesh 互連。
+- **代表論文精華**：
+  - **TEMP (HPCA 2026, Wang et al.)**：提出針對晶圓級晶片的實體感知張量分割與映射框架（Physical-Aware Tensor Partition-Mapping）。
+  - 核心機制包含：Replication-TP（張量平行）、TSPP（二維空間分割）、TATP Relay（環狀雙向鏈路轉發）、TCME 與 DLWS（動態層級工作集切換）。
+  - **DCIM × TEMP 移植裁決**：WSC 傳統使用數位 Register File + PE，而 DCIM 採用靜態 SRAM Array。若將 TEMP 搬到 DCIM，必須遵守「權重原地保留（WS）優先」、「以通訊換空間」、「禁止在 Macro 內部切跨層流水線」三大鐵律。
+
+### 4. 片上網路（NoC）與無死鎖路由（Deadlock-Free Routing）
+- **核心挑戰**：多晶片系統由內部 NoC（Intra-chiplet）與封裝級 D2D 互連（Inter-chiplet）共同構成階層化網路，封裝鏈路頻寬往往僅為片內 NoC 的 1/5 至 1/10，易發生網路壅塞（Congestion）與循環等待導致的死鎖（Deadlock）。
+- **代表論文精華**：
+  - **Shuang Liu et al. (IEEE TC 2024 / MCSoC 2023)**：基於整數線性規劃（ILP）構建多小晶片系統的無死鎖路由演算法，打破虛擬通道（Virtual Channel）配置依賴。
+  - **Bose et al. (CTH Network 2023)**：高擴展、高能效的多小晶片專用 NoC 拓撲平台。
+
+---
+
+## 二、關鍵概念查表與工程問答常見主題
+
+| 核心技術維度 | 關鍵指標 / 演算法 | 代表文獻與成果 |
+| :--- | :--- | :--- |
+| **DCIM 分割層級** | Bitcell → Subarray → Macro → Tile → Die → Chiplet | DCIM Partition Guide (`DCIM_partition_methods.md`) |
+| **小晶片任務映射** | 兩階段 BQP（全域晶片分配 + 局部核心排程） | Wang et al. IEEE TC 2025 (`wang-tc25-slides-draft.md`) |
+| **晶圓級張量分割** | Replication-TP, TSPP, TATP Relay Buffer | TEMP (HPCA 2026) |
+| **互連延遲優化** | 最小化跨 Chiplet D2D 封裝跳步（Hops）與通訊流量 | Lv et al. & Shuang Liu et al. |
+| **數據流策略** | Weight-Stationary (WS), Output-Stationary (OS), Hybrid | TriCIM 2026 & Chauvaux JSSC 2025 |
+
+---
+
+## 三、研究員問答諮詢示範情境
+
+1. **問：在 DCIM 晶片設計中，為什麼嚴禁把「Macro 內部 Subarray 的切法」與「跨 Tile / Die 的切法」混為一談？**
+   - **答**：因為 Subarray 內部的分割是電路級物理限制（受限於 Wordline/Bitline 長度、RC 延遲與類比/數位訊號衰減），資料交換走局部金屬線；而跨 Tile/Die 則是系統級與網路架構層次，受限於 NoC 路由器頻寬、D2D PHY 延遲與封裝熱功耗。混淆兩者會導致資料流映射產生嚴重的記憶體溢位與架構死鎖。
+
+2. **問：Wang TC'25 是如何解決多小晶片任務映射的計算複雜度問題？**
+   - **答**：該論文透過兩階段解耦：第一階段使用 Binary Quadratic Programming (BQP) 將神經網路運算節點映射至個別 Chiplet，目標是將高通訊權重限制在 Chiplet 內部；第二階段再針對各 Chiplet 內部的多核心進行細粒度拓撲感知分配，將原本 NP-hard 的超大搜尋空間降解為可在合理時間內收斂的優化問題。
+
+3. **問：TEMP (HPCA'26) 中的環狀雙向鏈路轉發（TATP Relay）可以直接套用在 DCIM 架構中嗎？**
+   - **答**：不可直接照搬。TEMP 的前提是 PE 具有高度靈活的暫存器轉發緩衝，而 DCIM 的儲存主要是靜態 SRAM 矩陣，缺乏大容量暫存器作多跳中繼。若要在 DCIM 上實現類似機制，必須額外配置專屬的 Ping-Pong Relay Buffer，並以空間換取跨 Die 傳輸延遲。

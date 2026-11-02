@@ -1,0 +1,263 @@
+# DCIM × TEMP 裁決報告：把 WSC（wafer-scale chip）的 tensor partition 機制搬到 SRAM 數位存算一體（DCIM）上
+
+**交付對象**：硬體/架構工程師
+**日期**：2026（依原始檔 metadata）
+**彙整素材**：`/tmp/dcim_facts/A1–A7、B1–B5、C1、C2`（14 份事實抽取／分析檔）+ 本人對 6 張關鍵圖的獨立 render 與目視複核
+**核心問題**：TEMP（HPCA 2026，WSC + 傳統數位 PE array）的 tensor partition / mapping 機制（replication-TP、TSPP、selective transfer、TATP relay、TCME、DLWS），在 DCIM（SRAM digital compute-in-memory）上是否成立？哪些要改、哪些不能搬？
+
+**標記規則**：
+- 「原文事實」= 直接來自 PDF 原文或圖表，附檔名＋頁碼/圖號/表號。
+- 「推論」= 由我跨來源整合／換算所得，**不是**任何一篇論文的原文結論。
+- 「原文未提供」= 原文明確沒有這項資訊，**不得當事實使用**。
+
+**來源縮寫**（完整檔名與 URL 見 §7）：
+
+| 縮寫 | 論文 | 慣例 |
+|---|---|---|
+| [SUN] | Sun et al., TCAD 43(4) 2024, pp.1191–1205 | dual PDF，奇數頁＝英文；引註用**期刊頁碼** |
+| [TEMP] | Wang et al., HPCA 2026 | dual PDF，奇數頁＝英文；引註用 **PDF 頁碼(英)** |
+| [WANG] | Wang et al., TCAS-I 2026 | dual PDF，奇數頁＝英文 |
+| [FLEX] | Chauvaux et al., ISCAS 2025 (FlexSpIM) | dual PDF，奇數頁＝英文 |
+| [WWW] | Sharma et al., TETC 13(3) 2025, pp.1215–1229 | dual PDF，奇數頁＝英文；引註用**期刊頁碼** |
+| [TRICIM] | TriCIM, TVLSI 34(7) 2026, pp.2187–2200 | dual PDF，奇數頁＝英文；引註用**期刊頁碼** |
+| [ZEXIN] | Fu et al., ISLPED 2025 | dual PDF |
+| [WEB] | A7 網路一手來源（YoshiokaReview / NatElec / BenchADC / PackW / AccelCIM / MinBuf / Scientia） | 二手彙整，未回原始 PDF 重驗（見 [C2] 第三節） |
+
+**本人獨立複核（非只讀 caption）**：以 `pymupdf` render 後目視判讀以下 6 張關鍵圖表，本文所有核心數字均經此複核：
+- [SUN] Fig. 1（p.1192，8T latch + OAI 單元、`XIN*W`）→ `/tmp/verdict_figs/SUN_pdfidx3.png`
+- [SUN] Fig. 4/5/6 + Table IV 所在頁（p.1194 能量分解、p.1197 模擬設定）→ `SUN_pdfidx7.png`、`SUN_pdfidx13.png`
+- [TEMP] Fig. 4（PDF p.5(英)，replication-TP + all-reduce）→ `TEMP_pdfidx5.png`
+- [TEMP] Fig. 10（PDF p.13(英)，TCME 統一表示、TATP 切 M/K）→ `TEMP_pdfidx13.png`
+- [WANG] Fig. 6（PDF p.4，input-stationary / weight-serial、LUT）→ `WANG_pdfidx7.png`
+- [WWW] Fig. 8 + Table IV/V（p.1222）＋ p.1226（M=1 結論）→ `WWW_pdfidx15.png`、`WWW_pdfidx23.png`
+- [FLEX] Fig. 2/3（PDF p.3，BL/BLB AND/NOR→XOR→full adder、unified memory、per-layer WS/OS）→ `FLEX_pdfidx3.png`
+
+---
+
+## §1 提問者的 DCIM 心智模型：驗證與修正
+
+提問者的模型為三句話：
+> (a) weight 存在 SRAM 內，讀出 Q/Qb，Qb 接 NOR gate 做 MAC。
+> (b) 一個 DCIM array 的輸入是「一個 row 用 bit-serial 方式送進來」，與陣列內權重矩陣相乘。
+> (c) DCIM PE 天生 weight-stationary（權重一旦寫進 array 就不動），activation 用串列位元流餵進去。
+
+**結論：這個模型描述的是「某一個特定流派（analog 風格、Q/Qb+NOR、單一 WS）的 DCIM」，不是 DCIM 的普遍事實。三個子句都需要修正。**
+
+### (a) 部分正確，但 cell-level 電路需修正
+
+| 子命題 | 判定 | 原文怎麼說 |
+|---|---|---|
+| weight 存在 SRAM array 內 | ✅ **正確** | [SUN] p.1192：「CIM 的權重典型存在 memory cell 內」；[WWW] p.1218 §III-C；[TRICIM] p.2195「weights reside persistently within the CIM array itself」。 |
+| 讀出 Q/Qb（差動） | ⚠️ **形式方向對、命名不普遍** | [SUN]/[WANG]/[WWW] 原文**未使用 `Q/Qb` 命名**（[C2] §斷言 2）。[SUN] 用 `WB`（單端）＋ `RWLDRV/RWLB`；[FLEX] 用 `BL/BLB`；[WWW] 用 `BL/BLb`。 |
+| Qb 接 NOR gate 做 MAC | ❌ **不精確，且非本文 macro** | [SUN] 這顆是 **8T latch bitcell ×2 + OAI（or-and-invert）cell**，不是「Q/Qb + NOR2」。原文逐字：「The macro exploits two 8T bitcells and an or-and-invert (OAI) cell as the MAC unit block」[SUN] p.1192，我已目視 Fig. 1（`SUN_pdfidx3.png`：`Latch based 8T bitcell`、`Two 8T bitcells + OAI`、輸出 `XIN*W`）。**「兩顆 12T bitcell + NOR2」是 [SUN] 引用的 prior work [8]（Fujiwara, ISSCC 2022）**，[SUN] 改用 8T+OAI 後 footprint 省 11%（[SUN] p.1193）。[WWW] 的 digital CIM 也只說用「bit-wise logic gates such as **AND or XOR**」，**NOR 原文未提供**（[C2] §斷言 2）。 |
+
+**補充（原文事實）**：[FLEX]（event-based）確實是 6T + `BL = A&B`、`BLB = NOR(A,B)` → 組出 `A⊕B = ~(A&B + (A+B))` → 再送 **1-bit full adder** 累加（[FLEX] Fig. 2(b)，`FLEX_pdfidx3.png`）。但**NOR 只是組 XOR 的一步，真正累加在 peripheral 的 full adder**。所以「Qb 接 NOR gate 直接做 MAC」即使在 [FLEX] 上也是把 array 端布林運算與 peripheral 端累加混為一談。
+
+**一句話**：真正的機制是「1-bit cell × 1-bit cell 的位元乘法（單一邏輯閘/單元）＋ columnwise adder tree 累加」；**adder tree 才是 DCIM 的公認瓶頸**（[WEB]/NatElec Discussion；[WEB]/BenchADC §IV-B-2）。「NOR gate」是其中一種實作。
+
+### (b) 部分正確，但「row」與「bit-serial」的層級錯位
+
+| 子命題 | 判定 | 原文怎麼說 |
+|---|---|---|
+| activation 以 bit-serial 餵入 | ✅ **在 WS 下正確** | [SUN] Table IV p.1197：**8 cycles per 8-bit MAC**；正文「the macro adopts a bit-serial input encoding scheme, it takes eight cycles to perform a single 8-bit MAC operation」（我已目視 `SUN_pdfidx13.png`）。 |
+| 「一個 row」用 bit-serial 送 | ❌ **需修正** | (i) bit-serial 沿**位元精度維度**（N-bit → N cycles），不是沿 spatial row；(ii) 一個 input vector **同時施加到所有 columns**（透過 WL/dedicated wires 沿 rows）[SUN] p.1196；(iii) input buffer 是「feeding **multiple** wordlines」，可同時開多條 row [WWW] Fig. 5 p.1219。 |
+| 輸入與陣列內權重矩陣相乘 | ✅ **正確（WS 下）** | 矩陣對應 `SR × T` 乘 `T × SC`；WS 時 `SR=N_WPF（=KH·KW·C_IN）`、`SC=C_OUT`、`T=N_OF（=OH·OW）`[SUN] Table III p.1195（我已目視 `B1_sun_p1195_tableIII.png`）。 |
+
+**補充**：[SUN] Fig. 1 的 `XIN 4b × 144` 埠與 `GCTRL 4cycle × 2(8b)/3(12b)/4(16b)` 標註暗示硬體以 **4-bit chunk** 分群送；但**正文只稱 bit-serial，未解釋 chunk 細節**（[SUN] Fig. 1；此為圖面推讀）。[WEB]/AccelCIM 的實例是每次 broadcast **2-bit slice**（IBW/2 cycles）[WEB] #9。
+
+### (c) 「天生 weight-stationary」❌ 錯；stationarity 是資料流選擇，不是物理天性
+
+**原文逐字（最關鍵的一條反證）**：
+> "Although CIM macros are typically considered a natural match to WS dataflow, it should be noted that **both WS and IS dataflow are supported equally-well by CIM macros as the weights and activations are interchangeable from the CIM computation perspective.**" — [SUN] p.1195
+
+三篇獨立 DCIM 硬體論文同時否證「恆為 WS」：
+1. **[WANG]**（TCAS-I 2026）是 **input-parallel / weight-serial、input-stationary**：activation 並行 pre-encode 成 `{0,1,2,3}×Ix` 的 LUT 並跨 output channel 共享，**串列的是 2-bit 權重（8-bit 權重需 Sdb=4 cycles）**，MAC 由 **LUT + mux + adder tree** 完成（[WANG] Fig. 6、§III-A；我已目視 `WANG_pdfidx7.png`）。
+2. **[FLEX]**（ISCAS 2025）是 **per-layer 可選 WS/OS 的 hybrid**，weight 與 membrane potential **共用同一塊 6T array**（unified memory）；原文明言「prior CIM-based SNNs **only support weight stationarity**」——WS-only 是舊設計特徵（[FLEX] p.3 §II、Abstract；`FLEX_pdfidx3.png`）。
+3. **[TRICIM]**（TVLSI 2026）把「計算維度→CIM 物理維度」明列為**搜尋變數，不是固定映射**；且 weight 在 layer-/tile-stationary 兩區**必須 runtime 重載**（[TRICIM] p.2195、p.2188–2190）。
+
+**「權重一旦寫進就不動」也不成立**：[SUN] p.1192 明言理想「weight 只寫一次永久不動」對真實 DNN **不實際**，實務採 layer-by-layer，層間必須更新 weight；[TRICIM] p.2193 說最小重載粒度＝**整個 CIM tile、full-matrix programming**。
+
+### 修正後的 DCIM 心智模型（可直接交付工程師）
+
+> DCIM array 內以 1-bit cell 為乘法單元、以 columnwise adder tree 累加；**「誰 stationary、誰 streaming」是每層可選的排程決策**（WS/IS/OS）。WS 為主流：收縮維 K→rows、輸出通道維 N→columns、M/B 走 temporal 串流，weight 在一個 fold/一層內 stationary，streaming operand（WS 下是 activation）以 **bit-serial 沿位元精度**餵入、且同一 vector 同時作用到所有 columns。**weight 不是永久不動**——容量不足時必須以「整個 tile、full-matrix」為粒度重載，而這是 DCIM 最貴、且**在同一 macro 內無法與計算平行**的操作。真正的能量瓶頸**不是 MAC**（僅佔 ~14%），而是 **activation/accumulator buffer 的 access energy（合計 70%）**。
+
+---
+
+## §2 DCIM 硬體的 8 條關鍵事實（每條附來源）
+
+> 以下每條皆為「原文事實」；括號內為本人獨立複核結果。
+
+**F1. DCIM 的 MAC 單元是「1-bit cell × 1-bit cell 位元乘法 + columnwise adder tree」，不是 NOR 直接做 MAC。**
+[SUN] p.1192–1193：一個 MAC unit block = **2 顆 8T latch bitcell + 1 顆 OAI cell**；OAI 同時做 row selection 與 bitwise multiplication，輸出 `XIN*W`；macro 內有 `144×4b multiply & adder tree` → **36b shifter & accumulator（signed-CLA adder）**。（本人目視 [SUN] Fig. 1 p.1192。）[WWW] p.1218 §III-C 只提 AND/XOR。[FLEX] Fig. 2(b)：BL=AND、BLB=NOR → XOR → 1-bit full adder。
+
+**F2. bit-serial 是沿「精度」軸，8-bit MAC = 8 cycles；input vector 同時施加到所有 columns。**
+[SUN] Table IV p.1197：**# of cycles per 8-bit MAC = 8**、Energy per 8-bit MAC = 0.046 pJ、Macro Freq = 1.04 GHz。（本人目視 `SUN_pdfidx13.png`。）[SUN] p.1196：input vector 本質上同時施加到所有 columns。[WEB]/AccelCIM：2-bit slice、IBW/2 cycles。
+
+**F3. 單一 macro 容量小、等效 MAC array 為 144×16（12b W）；單一 CiM primitive 僅 4 KB。**
+[SUN] Fig. 2 p.1193：macro **54 Kb、288 addresses × 192 cols**、MAC input size **144ch × 8/12/16b**、TOPS/W 最高 87.4 @0.5V、TOPS/mm² 最高 49.9 @0.9V；等效 MAC array **144×16**。[WWW] Table IV p.1222：四種 primitive **容量皆 4 KB**（Analog-6T/8T、Digital-6T/8T）。
+
+**F4. 能量瓶頸是 buffer，不是 MAC；activation buffer 是三者之最。**
+[SUN] Fig. 4 p.1194（MobileNetEdgeTPU）：**CIM Macro 14%、Weight Buffer 2%、Activation Buffer 38%、Accumulator Buffer 32%、Leakage 14%**；macro-level peak 與 workload-level 差 **7×–13×**（[SUN] Fig. 3）；原文結論「CIM MAC energy only accounts for ~14%」。（本人目視 `SUN_pdfidx7.png`。）
+
+**F5. 加速器配置：weight buffer 4 MB、activation buffer 8 MB、accumulator buffer 4 MB、DRAM LPDDR5 4.48 pJ/bit；activation buffer 必須容納相鄰兩層。**
+[SUN] Table IV p.1197 + 正文「The activation buffer capacity is set to be 8 MB, which is sufficient to contain the activations associated with the consecutive layers … such that the activations do not spill out to DRAM」。（本人目視。）accumulator buffer 可 flush 重用故較小。
+
+**F6. weight 重載是 DCIM 的一級成本，且「同一 macro 內不可與計算並行」；最小重載粒度＝整個 tile、full-matrix。**
+[TRICIM] p.2193 §V-B：「最小重載粒度嚴格限定在整個 CIM tile，每個 CIM macro 以 full-matrix programming 更新，不做 partial update」；[WEB]/PackW：「weight loading and computation **can not occur in parallel within one memory macro**」；[WEB]/AccelCIM：`T_s = κ·PC·WBW` cycles/row、bank 間 serial（**κ 原文未給定值**）。代價量級：[TRICIM] p.2197 model-stationary 相對 CiMLoop **2.8×–13.2× speedup、16.2×–86.7× energy**，原文歸因「primarily driven by **eliminating runtime weight-programming and off-chip weight transfers**」。
+
+**F7. CIM 容量 vs 模型/層大小決定「regime」；regime 決定是否需 runtime weight update。**
+[TRICIM] p.2188–2190 Fig. 1/3：`C_CIM ≥ W_model` = **model-stationary**（無 runtime weight update、fully pipelined）；`W_model > C_CIM ≥ W_layer` = **layer-stationary**（需 runtime update、組內 pipeline）；`C_CIM < W_layer` = **tile-stationary**（頻繁 update、sequential）。實測：ResNet-18 11.2M 在 ISAAC-Large/Medium 為 model-stationary，在 ISAAC-Small 落 layer↔tile 邊界（[TRICIM] p.2196 Fig. 11）。同文 Table III p.2196：ISAAC-Large **504 MB / 1344 tiles**、Medium **63 MB / 168**、Small **12 MB / 32**、AdaPIM **0.72 MB**。
+
+**F8. DCIM 的失效邊界有四道：M=1 GEMV、K 超過 in-situ reduction 能力、DW-CONV、memory-bound layer。**
+[WWW] p.1226：M=1 時 energy efficiency **低到 0.03 TOPS/W、吞吐 ≈31 GFLOPS**，「matrix vector multiplication layers exhibit no improvement in energy efficiency, even with an increased number of CiM primitives」（本人目視 `WWW_pdfidx23.png`）。[WWW] p.1224–1225：**K 超過 primitive in-situ reduction 能力（Digital-6T 一次 256 rows；on-chip 上限約 512）→ partial sum 被寫回/讀回 main memory、TOPS/W 停滯**。[SUN] Fig. 6 p.1194：含 DW-CONV 的 workload 利用率僅 **9%–31%**（MobileNetEdgeTPU 31%、MobileDETs 23%、DeepLabV3+ 9.4%、MOSAIC 9.1%），且「大 batch 無法解決」；切 IS 後 DW-CONV 利用率提升 **~13×**、整體 utilization 2.2×、EDP 0.4×（[SUN] Fig. 11 p.1198–1199）。[WWW] Table V p.1222：CiM 化快取**不會**提升 memory-bound layer 的效能。
+
+---
+
+## §3 裁決矩陣（核心產物）
+
+**評估基準**：以提問者的 canonical DCIM（WS + bit-serial activation）為主；另註明 IS/weight-serial 變體的差異。
+**verdict 四級**：有效 ／ 部分有效 ／ 無效 ／ 反而有害。
+
+| TEMP 機制 | 對 DCIM 有效？ | 為什麼（硬體機制層級） | 需要怎麼改 | 證據 |
+|---|---|---|---|---|
+| **1. replication-relied TP**（W 沿 (N,K) 切 2×2；I 沿 N 對半切並複製；device pair 間 all-reduce） | **反而有害** | ① 切到 **收縮維**（TEMP 的 N = hidden = DCIM 的 rows）→ 強制跨 array/die partial-sum reduction；DCIM 的 reduction 一旦超過 in-situ 能力（256/512）就退回 main memory，TOPS/W 崩（F8）。② activation replication 直接吃 **8 MB activation buffer**——而它是**第一號能量項（38%）**且不可 flush（F4、F5）。③ 它把 SRAM 本已稀缺的容量再切碎，系統易從 model-stationary 掉進 layer/tile-stationary（F7），價值主張（13–87×）崩掉。 | 不要切收縮維；若要更多平行度，**先切輸出通道維 N**（columns，無 reduction），再切 M/B。activation 若必須共享，優先用 **multicast**（源 1×、sink D×）而非複製落地。 | [TEMP] Fig. 4(a)（PDF p.5(英)，本人目視 `TEMP_pdfidx5.png`）：W 切 2×2 沿 (N,K)、I 沿 N 複製、all-reduce 在 D0↔D2/D1↔D3。DCIM 側：F6/F7/F8、[SUN] Fig. 4 p.1194。 |
+| **2. TSPP 切法**（切 M × 切輸出維 K、**不切收縮維**；non-overlapping；ring 交換；通訊與 compute 重疊） | **部分有效**（切法正確，但「重疊」與「stream 誰」的前提要改） | **利多**：TEMP 的張量式 `O[B,M,K]=I[B,M,N]·W[N,K]` 中 **N 才是收縮維**，TATP/TSPP **只切 M 與 K(輸出)、N 完整**（[TEMP] Fig. 10，本人目視）⇒ **跨 die 無 partial-sum reduction，且消除 activation replication**——這**恰好等於** DCIM-aware 的最佳切法（先切 columns/輸出、再切 M/B）。**利空**：原文明言「fully overlapping communication with computation」，但若 stream 進來的 sub-tensor 是 **weight**，它在 DCIM 上是對 stationary array 做 **full-matrix reprogram**，**同 macro 內不可與計算並行**（F6）。且 selective policy 會挑到 weight（見第 3 列）。 | (i) 保留「不切收縮維」的切法；(ii) 把 overlap 假設改成「有條件的 overlap」——weight reload 要用 **ping-pong/pipeline** 顯式排程，代價是**計算平行度減半**（[TRICIM] p.2195–2196）；(iii) 若某層 W 放得進 on-chip，就**常駐/複製 W、永遠 stream activation**。 | [TEMP] Fig. 8/10（PDF p.11/p.13(英)）；[TRICIM] p.2193/2195–2196；[WEB]/PackW、[WEB]/AccelCIM §3.2。 |
+| **3. selective transfer policy**（每 round「固定挑資料量較小者」stream；Llama2-7B seq>14k 時 activation≈3×weight ⇒ **優先 stream weights**） | **反而有害**（在 WS DCIM 上）；**部分有效**（在 IS/weight-serial DCIM 上） | DCIM 引入 dense PE 沒有的**成本不對稱**：同為 1 bit，**weight 需 array programming、不可與 compute 重疊**（F6），activation 走 streaming 路徑、可 overlap。所以「bytes 較小」≠「較便宜」——對長序列選 weight，正好踩到**最貴且不可重疊**的路徑。**反轉條件**：若 macro 是 **IS/weight-serial**（[WANG]），串流對象本來就是 weight、activation 並行；此時 TEMP 政策是**原生資料流**。 | 把第一判準從「bytes」改成「**這個 operand 是否需 reprogram array**」：只要 weight 能保持 stationary，**即使 activation 較大也選擇 stream/replicate activation**（或 multicast）；只有 weight 本來就要換層、或 weight 是前一運算的輸出（dynamic weight）時，才輪到 bytes 判準。 | [TEMP] p.13(英) §V；F6；[WANG] Fig. 6（input-stationary/weight-serial）；[FLEX] p.3（per-layer WS/OS）。 |
+| **4. TATP relay**（bidirectional redundant-transfer；每個 sub-tensor 同時往兩方向傳；所有傳輸 ≤1 physical hop） | **部分有效**（拓撲自覺排序可留；**雙向冗餘傳輸在 weight 路徑上反而有害**） | **可留**：把 logical ring 對到 physical ring、每步只送鄰居、避免 O(N)-hop，是通用且正確的排程概念（見 §5）。**該捨**：冗餘＝把流量加倍——對 activation 是打在本已最大的能量項（buffer）；對 **weight 則是 2× full-matrix reprogram**，且不可與 compute 重疊（F6）。**另一關鍵**：DCIM 是吞吐機器、compute latency 高（primitive 9–233 ns，[WWW] Table IV），有 overlap 時 hop latency 可被吸收；DCIM 真正的約束是**傳輸粒度/頻寬與 buffer 容量**，不是 hop 數。 | 只採用其「topology-aware、單份、≤1-hop」的**排程**；**捨棄雙向冗餘**。weight reload 用 ping-pong/pipeline 藏進計算窗口；跨 array reduction 用 **in-network reduction**（[ZEXIN] NoC router 內建 vector adder）而非冗餘搬移。 | [TEMP] Fig. 8 + Alg. 1（PDF p.11(英)，本人目視）、p.13(英)；[TRICIM] p.2195–2196；[ZEXIN] §V、Fig. 5；[WWW] Table IV p.1222。 |
+| **5. TCME 統一表示**（B/M/N/K 四維 + spatio-temporal round；統一 DP/SP/TP/TATP） | **部分有效**（「帳本」格式可留，但需補一層 array-level 表示，且 N/K 慣例與 DCIM/BLAS 相反） | 表示層本身是通用的（任何 partition 都能記帳）；但 (i) **TEMP 的 N 是收縮維、K 是輸出維，與 DCIM/BLAS 慣例（K 收縮、N 輸出）顛倒**，不先釘慣例會把成本表整張讀反；(ii) 它只到 **die 級**，缺 DCIM 真正決定成本的 **array/fold 級維度**（`{t_ow,t_ic,t_oc,t_kh,t_kw} ≤ {p_*}`）；(iii) 它只有 W vs I 兩個 operand，**無法表示 FlexSpIM 的第三種 stationary operand（membrane potential）**；(iv) 全程 FP16/FP32，**無 bit-precision 軸**（bit-serial cycles 是 DCIM 最大成本軸之一）。 | 在其下補一層 **intra-die / array-level** 表示（TriCIM 的物理維度與 loop order）；把 W/I 二選一推廣為「可 stationary 的第三種 operand」；加入 bit 精度軸；釘死與 BLAS 的維度對應。 | [TEMP] Fig. 10（本人目視）；[SUN] Table III p.1195；[TRICIM] Fig. 9 p.2194–2195；[FLEX] p.3/p.5；[B1] 命名警告。 |
+| **6. DLWS solver**（cost model `T_intra=Collective+max{Comp,P2P}`、`T_inter=P2P`、`T_total=ΣT_intra+ΣT_inter`；DP 分段 + GA 搜尋） | **部分有效**（搜尋骨架可留；**cost model 內核必須重寫**） | `max{Comp, P2P}` 的前提是「計算與 P2P 可互相重疊取大」——對 **weight 路徑在 DCIM 上不成立**（同 macro 內 weight write 與 compute 互斥，F6）。模型還漏掉三個一級成本：**weight reprogram**、**bit-serial activation 的 per-access buffer 成本**（不信 bytes、信 access 次數）、**reduction 位置（R1 intra-macro / R2 acc-buffer / R3 on-chip+INR / R4 main-memory）的巨大差異**。 | 保留 **DP 分段 + GA** 骨架與 `Σintra+Σinter` 結構；把內層 cost function 換成 DCIM 版：weight 路徑改成串聯或 ping-pong（計入平行度懲罰）、`Comp` 改成「bit-serial cycles vs buffer-access cycles 取大」、reduction 位置列為**顯式搜尋變數**。並新增基因：per-layer WS/IS、容量分區、tile 形狀、reload 模式。 | [TEMP] Eq.2–4（PDF p.9(英)）；F6；[SUN] p.1194/1196/1199；[WWW] Table III p.1221（RF 11.47 / SMEM 124.69 / DRAM 512.00 pJ per access）；[TRICIM] Fig. 9/10；[B5] §步驟 4。 |
+
+**矩陣讀法**：TEMP 的**維度切法（TSPP/TATP 不切收縮維）與 DCIM 慣例對齊**，這是它最有價值的遺產；真正必須改的是**傳輸政策（selective transfer 的方向）與 cost model 內核**，而不是 partition 本身。B 系列的「需大幅修改」應精確定位在後兩者。
+
+---
+
+## §4 三個「在 DCIM 上反而更該做的事」（red team 情境）
+
+> 以下三項在 TEMP 的 WSC+dense-PE 框架下**不是**首選，但在 DCIM 上反而是第一優先。每項標明原文事實依據與推論界線。
+
+### 該做之一：**把權重釘死、讓 activation 流動——反轉 selective transfer 的方向**
+
+- **硬體理由（原文事實）**：weight 移動＝array reprogram，不可與同 macro compute 重疊、粒度是整個 tile（F6）；相對地 activation 本來就是 WS 的 streaming operand，且可 multicast（[TEMP] Fig. 4(a) 的 `I0` 由 D0/D1 共用，本人目視）。
+- **做的事**：只要 `W_layer ≤ C_CIM`（甚至 `W_model ≤ C_CIM`），就把 weight **常駐**；需要資料交換時**串流/replicate activation**，即使它比 weight 大（TEMP 對 Llama2-7B seq>14k 的建議正好相反）。
+- **紅隊的關鍵反駁（[TEMP] R1/R3）**：TEMP 的 TATP 切法本身**就是** DCIM-aware 最佳切法（TATP 切 M 與輸出維＝B5 Rule 2）；所以這不是「推翻 partition」，而是「保留 partition、反轉 policy」。
+- **原文界線**：[TEMP] 的 4 條切法規則是 [B5] 的**跨論文推論**，非 TEMP 原文；本項為**推論**。
+
+### 該做之二：**把「CIM 容量」當第一設計變數，先進 model-stationary 區，而不是先最小化 replication**
+
+- **硬體理由（原文事實）**：`C_CIM ≥ W_model` 時**完全無 runtime weight update、fully pipelined**；model-stationary 相對 CiMLoop 有 **2.8–13.2× speedup、16.2–86.7× energy reduction**，layer-/tile-stationary 僅剩 1.1–2.9× / 1.2–2.3×（[TRICIM] p.2190、p.2197）。這就是「掉出 model-stationary 就崩」的量化證據。
+- **做的事**：把 wafer 的 **die 級 aggregate SRAM/array 容量**（[TEMP] Table I：每 logic die 80 MB；4×8 評估配置）用來讓 `W_model`/`W_layer` 常駐，以換取 regime 躍遷；**不要為了平行度把 B 切小**（切 B 會稀釋 batch 對 weight reload 的攤薄效果，[TRICIM] p.2199 Fig. 16）。
+- **原文界線**：把 TEMP 的 die 級 N 對應到 DCIM 的 fold/array 數**沒有公式**（[TEMP] 全文 0 次 CIM；[C2]）。此項的容量成立性為**推論**，需 §6 的容量掃描定案。
+
+### 該做之三：**用「reload 排程」而不是「reload 消除」——ping-pong/pipeline + 拓撲自覺單份 ≤1-hop + in-network reduction；在 IS macro 上順勢而為**
+
+- **硬體理由（原文事實）**：weight reload 在本 macro 內不可重疊，但**跨 tile 可以**——[TRICIM] 的 overlapped weight reloading：某層算完其 tile 立即釋放寫下一 group、與其他 tile 計算重疊（p.2193 §V-B）；ping-pong/pipeline 可完全藏住 reload latency，代價是**計算平行度減半**（p.2195–2196）。判準：`Tcomp/Twt < 0.5` → ping-pong（memory-bound）；`> 2` → sequential（compute-bound）。
+- **做的事**：
+  1. 若有 reload，用 **ping-pong/pipeline** 顯式排程（接受平行度減半），並用 **拓撲自覺、單份、≤1-hop** 排序送達（借 TATP 的排程、**捨棄雙向冗餘**）。
+  2. 跨 array partial sum 用 **in-network reduction**（[ZEXIN] router 內 vector adder）或 TriCIM 式 on-chip ACCU，讓每個 Psum 只出 DRAM 一次。
+  3. 若 macro 是 **IS/weight-serial**（[WANG]），TEMP 的「stream weight」是**原生路徑**，不需反轉——此時直接用 LUT 共享 activation 的 reuse。
+  4. 有 spare array 時用 **weight duplication**（[ZEXIN] ACIM→DCIM row-by-row pipeline）填 idle PE。
+- **原文界線**：ping-pong 平行度減半對 end-to-end 的真實影響**原文未提供**；κ 無絕對值，故「移 weight 較貴」的量級是**架構層推論**。
+
+---
+
+## §5 對 TEMP 論文的具體評語
+
+### 5.1 WSC + 傳統 PE 專屬、搬到 DCIM 就不成立的結論
+
+| TEMP 主張 | 來源 | 為何在 DCIM 不成立 |
+|---|---|---|
+| 「**stationary tensor placement 是問題根源**，應放棄 stationarity、改用 tensor-streaming」 | [TEMP] p.5–7(英) §III-A、p.27(英) §IX | **哲學相反**：DCIM 的效率來源**就是** weight stationarity（K→rows、N→cols 以減少 array 寫入，[WWW] p.1220）。正確框架是「盡量維持 stationarity，只在容量逼迫時才付 reload 成本」。問題不是 stationarity，而是「把**非 weight 的 operand 也強制 stationary 並複製」。 |
+| **selective transfer「固定挑資料量較小者」** | [TEMP] p.13(英) §V | DCIM 有成本不對稱：1 bit weight（write/program、不可重疊）≠ 1 bit activation（read/stream、可 overlap）。「較小」≠「較便宜」。 |
+| 「PP 次優，因 WSC D2D 頻寬高、pipeline bubbles 不划算」 | [TEMP] p.5(英) §II-A | DCIM 的瓶頸**不是 link 頻寬**，而是 array programming（不可重疊、粒度＝整個 tile）。DCIM 反而**需要** PP-like ping-pong 來藏 reload。 |
+| **cost model `T_intra = Collective + max{Comp, P2P}`**（隱含 comm 可與 compute 重疊取大） | [TEMP] Eq.2（PDF p.9(英)） | 對 weight 路徑不成立：同 macro 內 weight write 與 compute **互斥**（[WEB]/PackW）。`max{}` 形式會系統性低估 weight 成本。 |
+| **O(N)-hop tail latency 是首要障礙**，用雙向冗餘解 | [TEMP] p.7/p.9(英) Fig. 5(a) | DCIM 高 compute latency + 吞吐導向 ⇒ 有 overlap 時 hop latency 可被吸收；首要約束是**傳輸粒度/頻寬與 buffer 容量**。冗餘傳輸在 weight 路徑**加倍最貴的重寫**。 |
+| **collective 佔訓練時間 40%**、D2D 利用率 <55% | [TEMP] p.7(英) §III-A、Fig. 4(b) | 這是 WSC dense-PE **訓練** workload 的具體數字，機制（NCCL all-reduce）不可移植；DCIM 的對應成本是 accumulator buffer traffic（∝FR）與 main-memory 退回，不是 pJ/bit-D2D。 |
+| **甜點 N≈4–16 dies**；power 最佳 4–8 | [TEMP] p.13(英) Fig. 9、p.27(英) | 這是 **die 級**的 `O(1/N) memory vs O(1) comm` 槓桿；DCIM 的平行度旋鈕是 `Rp×Cp`、`FR×FC`、iso-area 能放幾個 primitive（Analog-6T 3、Digital-6T 3、Analog-8T 2、Digital-8T 4，[WWW] p.1223 Fig. 9）。層級不同，不可換算。 |
+| cost model 假設 weight 住 HBM、以 6.0 pJ/bit HBM + 5.0 pJ/bit D2D 搬運 | [TEMP] Table I p.17(英) | **模型裡完全沒有 weight-programming 項**，且全程 FP16/FP32，**無 bit-precision 軸**。任何逼 DCIM 換權重的 partition 都會被系統性低估。 |
+| **D2D 需 tens–hundreds MB 粒度**才達峰值 | [TEMP] p.7(英) §III-B | 此主張本身**不與** DCIM 的 bit-serial row 餵入衝突（不同層級）；但 TEMP 未意識到：它自己的 selective policy 長序列時選中的 **sub-weight 可能遠小於此粒度**，系統性落入壞區。 |
+
+### 5.2 跨架構通用、可移植到 DCIM 的結論
+
+| TEMP 通用結論 | 為何通用 |
+|---|---|
+| **topology-aware mapping**（logical ring ↔ physical ring、每步只送鄰居、≤1-hop、避免 O(N)-hop long-haul） | 純拓撲排程概念，與資料型別無關；DCIM 上仍適用（只是要搭「單份」而非冗餘）。 |
+| **congestion-aware routing / path merging / multicast**（TCME 的 traffic-conscious communication optimizer） | DCIM-on-WSC 仍由 D2D 承載 activation 與 reload 流量，壅塞最佳化仍有效。 |
+| **「只有切到收縮（reduction）維度才原生產生 reduction」** | 線性代數層級事實：TATP 切 M/輸出維 ⇒ 無 all-reduce；baseline TP 切含收縮維的 (N,K) ⇒ 必須 all-reduce。此結構結論在 DCIM 同樣成立（DCIM 的對應成本是 accumulator traffic）。 |
+| **replication 會浪費記憶體、streaming 在高頻寬互連下可省記憶體** | 方向通用（DCIM 上以 activation buffer 容量的浪費重現）；但**被複製/串流的物件與成本模型必須重新推導**。 |
+| **selective transfer 的「原理」＝stream 較便宜的 operand** | 原理通用；但**判準（bytes）不通用**，DCIM 需改用「stationarity/reprogram 成本」。 |
+| **B/M/N/K + spatio-temporal round 的記帳格式** | 通用帳本格式，可保留（需補 array-level 與 bit 軸）。 |
+| **DLWS 的 DP 分段 + GA 求解骨架** | 通用搜尋骨架，可保留（只換 cost function 與染色體）。 |
+| **容量決定 regime**（TEMP 以「per-die memory capacity」為軸；[TRICIM] 以 `C_CIM` vs `W_model/W_layer` 為軸） | 兩個獨立來源都指向同一結構：**容量是根本限制**，切開後必然產生 reduction / weight-movement 成本。 |
+
+---
+
+## §6 待驗證清單（需要什麼實驗/量測/論文才能定案）
+
+> 依「殺傷力」排序。每一項標明：要量什麼、為什麼是決定性的、目前缺哪個常數。
+
+| # | 待驗證項 | 要量什麼 | 為何決定性 | 目前缺口 |
+|---|---|---|---|---|
+| V1 | **iso-node 每 bit 成本表 + reload overlap 量測** | (i) weight 寫入 array 的 cycles 與 pJ/bit（驗證 `T_s=κ·PC·WBW` 的 **κ**）；(ii) bit-serial activation 餵入 pJ/bit；(iii) activation buffer read pJ/bit；(iv) array 級 D2D pJ/bit | 所有「weight 較貴／該 stream activation」的結論都建立在 **κ 無絕對值**上 | **κ 原文未提供**（[WEB]/AccelCIM）；weight programming 絕對 pJ/bit **原文未提供**（[C2] §斷言 3） |
+| V2 | **容量掃描（regime 判定）** | 對 ResNet-18 / BERT-base/large / Llama2-7B/70B，在 4/8-bit 下算每 die 與每 wafer 的 aggregate CIM 容量，判定 `C_CIM ≥ W_layer` 或 `≥ W_model` | 若進 model-stationary，weight-reload 一級成本**歸零**，verdict 反轉為「有效」 | TEMP 全文無 CIM 內容；DCIM-on-WSC 聚合容量**原文未提供** |
+| V3 | **head-to-head cycle-accurate 對照模擬** | 在 DCIM-on-WSC 模型跑四種映射：(a) TEMP 原排程；(b) 同維度切法但 transfer policy 改 activation multicast；(c) model-resident WS；(d) baseline TP + multicast。Sweep `B∈{1,8,64,256}`、`seq∈{2k,14k,64k}` | 唯一能直接回答「TEMP 有效/無效/有效但政策要改」的實驗；目前 B1–B5 全是跨論文推論 | **DCIM-on-WSC 模型不存在**（TEMP 是 die 級 dense PE、DCIM 論文是 macro 級，對接點原文未提供） |
+| V4 | **activation/accumulator buffer 流量計帳** | 在 V3 模擬器插樁，數 TEMP 排程下的 activation buffer reads/writes 與 partial-sum 存取，對比無分區 baseline | activation+accumulator = 總能量 **70%**；若 TEMP 排程**增加**了 activation buffer 流量，即使省下 weight 搬移也可能淨虧 | 無跨 die 的 activation buffer 容量模型 |
+| V5 | **D2D chunk-size vs 有效頻寬** | 量 1 KB / 1 MB / 100 MB chunk 的實得頻寬，比對 die 級 sub-tensor 大小 | 若 MB 級 chunk 就能打滿鏈路，則「粒度不匹配」反例是稻草人 | [TEMP] 只給「tens–hundreds MB 才達峰值」的定性敘述 |
+| V6 | **收縮維被迫切的層的實測** | 對 `W_layer > C_CIM_die` 或 `K > 256/512` 的層，量跨 die partial-sum 流量 | 這是**唯一穩固的殺手**：TATP 不切收縮維，若目標模型普遍落此區，TEMP 的「零 reduction」優點消失 | 目標模型的 K 分佈未量測 |
+| V7 | **selective policy 消融** | 同一 DCIM 硬體比較 TEMP 原政策 vs「永遠 stream activation」；在 IS/weight-serial macro 上應預期原政策勝出 | 把「需修改」精確定位到**政策**而非**partition** | 未見 DCIM 上的 B/seq sweep 量測 |
+| V8 | **reload 排程的實際 overlap 效率** | ping-pong「平行度減半」對 end-to-end 的真實影響；跨 tile overlapped reload 的隱藏比例 | 決定「reload 排程」是否真能救 layer-/tile-stationary | [TRICIM] 自述 macro 層不確定性被抽象化；AccelCIM 只說 overlap 最多省 50%、實務有限 |
+| V9 | **im2col / partial-sum buffer 的實際需求** | DCIM 是否走顯式 im2col；若走，其 activation buffer 需求 | 五篇硬體論文的關鍵字 **`im2col` 命中 0 次（原文未提供）**；[C1] 的 12× 估算是推論 | 原文未提供 im2col buffer |
+| V10 | **bit-serial 掃描順序與 accumulator 位寬** | LSB→MSB 或反之；內部 adder tree 完整位寬策略 | 影響 bit 軸與 K 軸的實際常數 | **原文未提供**（[WWW] §五；僅 [FLEX] p.3 說 rows 是 LSB→MSB，那是 event-based 設計） |
+| V11 | **third-operand（membrane potential）情境** | 在 spiking/event-based workload 上，stationary operand 是 potential 而非 W/I 時的 partition 行為 | TCME 的「W vs I 二選一」表示不足 | [FLEX] 的 unified memory 只在 SNN + 高 sparsity 場景驗證 |
+| V12 | **κ / weight-program 的絕對值（跨 macro 彙整庫）** | 同製程同精度下「CIM array weight write per bit」的統一量測 | 讓 Rule 3 的 `M_i` 下限與 selective policy 可被**算出**而非假設 | 現有常數 granularity 不一致（A4 Table III 的 pJ per access 未明示粒度；A2 6.68 fJ 是 restore 非跨 die 複製） |
+
+---
+
+## §7 參考來源清單（檔名 ＋ 頁碼/圖號 ＋ URL）
+
+### 主要論文（本地 PDF，路徑皆為 `/mnt/c/Users/user/IEEE_Papers/paper_TW/`）
+
+| 縮寫 | 檔名 | 引用頁碼/圖表 | URL/DOI |
+|---|---|---|---|
+| [SUN] | `2024_Xiaoyu Sun_Efficient Processing of MLPerf Mobile Workloads Using Digital Compute-In-M_10318181-dual.pdf` | Fig. 1 p.1192；Fig. 2 p.1193；Fig. 3/4/5/6 p.1193–1194；Table III p.1195；eq.10–15 p.1196；Table IV p.1197；Fig. 11/12/13 p.1198–1199；Fig. 14/16 p.1200；Fig. 17–18 p.1202 | DOI 10.1109/TCAD.2023.3333290 |
+| [TEMP] | `TEMP_A_Memory_Efficient_Physical-Aware_Tensor_Partition-Mapping_Framework_on_Wafer-Scale_Chips-dual.pdf` | Fig. 3 p.3(英)；Fig. 4(a)(b)(c) p.5(英)；§II-A p.5(英)；Fig. 5 p.7(英)；§III-A p.7(英)；Fig. 7 p.9(英)；Eq.2–4 p.9(英)；Fig. 8 + Alg.1 p.11(英)；Fig. 9/10 §V/§VI-A p.13(英)；Fig. 10 p.15(英)；Table I p.17(英)；§VIII-A p.19(英)；takeaways p.27(英) | DOI 10.1109/HPCA68181.2026.11408568 |
+| [WANG] | `2026_Dengfeng Wang_A Full-Digital Heterogeneous Computing-in-Memory With Dual-Bit Serializ_11535964-dual.pdf` | Table I p.3；§II-A p.3；Fig. 5/6 p.4–5；Fig. 7 p.4；§III-A p.4；Fig. 12 p.6；Fig. 13 p.6–7；Table V p.9；Table VI p.10；Fig. 18 p.9；Fig. 22/29/30 p.11–12 | DOI 10.1109/TCSI.2026.3695668 |
+| [FLEX] | `2025_Nicolas Chauvaux_An Event-Based Digital Compute-In-Memory Accelerator with Flexible O_11043507-dual.pdf` | Fig. 1 p.1；Fig. 2(a)–(e) p.3；Fig. 3 p.3；§II-A p.3–4；Fig. 4(a)(b) p.5；Fig. 5(a)(b) p.5；Fig. 7(a)–(d) p.7；Table I p.7 | DOI 10.1109/ISCAS56072.2025.11043507 |
+| [WWW] | `2025_Tanvi Sharma_What, When, Where to Compute-in-Memory for Efficient Matrix Multiplicati_11026257-dual.pdf` | Fig. 5 p.1219；§IV-A p.1219–1220；§IV-B p.1220–1221；Table III p.1221；Table IV p.1222；Table V p.1222；Fig. 8 p.1222；Fig. 9 p.1223；§VI p.1224–1225；p.1226；§VI-D/建議 p.1227–1228 | DOI 10.1109/TETC.2025. ×（TETC 13(3):1215–1229） |
+| [TRICIM] | `2026_TriCIM_ A General CIM-Capacity-Aware Framework for Optimizing Model, Layer, and Tile-_11511842-dual.pdf` | Fig. 1/3 p.2188–2190；Fig. 2(a)(b) p.2188；Fig. 9 p.2194–2195；Fig. 10 p.2195–2196；§V-B p.2193；Table III p.2196；Fig. 11 p.2196；§VIII-B1/B2/B3 p.2197；Fig. 16 p.2199；§VIII-E p.2199 | DOI 10.1109/TVLSI.2026. ×（TVLSI 34(7):2187–2200） |
+| [ZEXIN] | `2025_Zexin Fu_Optimizing Heterogeneous Compute-in-Memory with Hybrid Dataflow and In-Netwo_11261801-dual.pdf` | §I p.1；Fig. 1 p.1–2；§III-A/B/C；§IV-B Fig. 3；§V-A/C Fig. 5；Table I p.9；§VI-B Fig. 6 | DOI 10.1109/ISLPED65674.2025.11261801 |
+
+### 網路一手來源（經 [WEB] = A7 彙整；**未回原始 PDF 重驗**，見 [C2] 第三節）
+
+| 簡稱 | 出處 | URL |
+|---|---|---|
+| YoshiokaReview | K. Yoshioka et al., "A Review of SRAM-based Compute-in-Memory Circuits", arXiv:2411.06079 | https://arxiv.org/abs/2411.06079 |
+| NatElec | S. Yao et al., "A full spectrum of computing-in-memory technologies", Nature Electronics 6, 823–835 (2023) | https://discovery.ucl.ac.uk/10185844/1/Manuscript_Nature_Electronics.pdf |
+| BenchADC | P. Houshmand, J. Sun, M. Verhelst, arXiv:2305.18335 (2023) | https://arxiv.org/abs/2305.18335 |
+| PackW | P. Houshmand, M. Verhelst, arXiv:2409.11437 (2024) | https://arxiv.org/abs/2409.11437 |
+| AccelCIM | C. Xue et al., DAC'26, arXiv:2604.17692 | https://arxiv.org/abs/2604.17692 |
+| MinBuf | C. Song, D. S. Jeong, arXiv:2508.14375 (2025) | https://arxiv.org/abs/2508.14375 |
+| Scientia | 葉樂等，「SRAM 存算一體芯片研究：發展與挑戰」，中國科學：信息科學 54(1):25–33 (2024) | https://www.sciengine.com/doi/pdf/849CA72AC3F34E5E887CC6873E698296 |
+| PICO | Z. Chen et al., "PICO-RAM", arXiv:2407.12829 (2024), JSSC | https://arxiv.org/abs/2407.12829 |
+| CiMLoop | "CiMLoop", ISPASS 2024, arXiv:2405.07259 | https://arxiv.org/abs/2405.07259 |
+
+### 本報告引用的事實抽取/分析檔（內部）
+
+`/tmp/dcim_facts/A1_sun_mlperf.md`、`A2_wang_dualbrit.md`、`A3_eventbased.md`、`A4_cim_when_where.md`、`A5_tricim_hybrid.md`、`A6_TEMP_baseline.md`、`A7_web.md`、`B1_dims.md`、`B2_replication_tp.md`、`B3_tspp_streaming.md`、`B4_tatp_topology.md`、`B5_mapping_solver.md`、`C1_redteam.md`、`C2_factcheck.md`
+
+### 本人獨立 render 的驗證圖（`/tmp/verdict_figs/`）
+`SUN_pdfidx3.png`（[SUN] Fig.1）、`SUN_pdfidx7.png`（[SUN] Fig.4/5/6）、`SUN_pdfidx13.png`（[SUN] Table IV）、`TEMP_pdfidx5.png`（[TEMP] Fig.4）、`TEMP_pdfidx13.png`（[TEMP] Fig.10）、`WANG_pdfidx7.png`（[WANG] Fig.6）、`WWW_pdfidx15.png`（[WWW] Fig.8/Table IV/V）、`WWW_pdfidx23.png`（[WWW] p.1226）、`FLEX_pdfidx3.png`（[FLEX] Fig.2/3）
+
+---
+
+## 附錄 A：已知的原文矛盾與不精確處（不得當事實）
+
+1. **[FLEX] 原文內部不一致**：§II 一邊寫「phase 5 write-back 新的 membrane potential bit **into A**」，卻又把 A 定義成 weight；疑為筆誤（[A3] §2、[C2]）。
+2. **[TEMP] HBM 頻寬內部矛盾**：p.5(英) 寫 **0.8 TB/s per stack**，Table I 寫 **1 TB/s**；原文未說明（[A6]、[C2]）。
+3. **[TEMP] die footprint 矛盾**：24.99×33.25 = 830.9 mm²，但 Table I 的 logic die 500 mm² + HBM die 210 mm²；層級差異原文未說明。
+4. **[TEMP] collective 佔比**：headline 是 **40%**，Fig. 4(b) 六值為 **40/37/46/35/33/53%**（全距 **33–53%**）；[C2] 指出 B2 寫「35–53%」為引用錯誤。
+5. **[WANG] 1.6 TOPS 計算式原文未提供**，無法用 16×16×200 MHz 反推吻合。
+6. **[SUN] `XIN 4b×144` 與 `GCTRL 4cycle`** 暗示 4-bit chunk 分群送，但正文只稱 bit-serial，未解釋 chunk 細節（圖面推讀）。
+
+## 附錄 B：一句話總結
+
+**TEMP 的「維度切法」是 DCIM-aware 的（不切收縮維 ⇒ 免 all-reduce；切 M/輸出維 ⇒ 免 activation 複製），但它的「傳輸政策與 cost model」是為 dense PE + 高頻寬互連寫的，搬到 DCIM 上會系統性選到最貴的 weight reprogram 路徑、並低估 bit-serial buffer access 與 reduction 位置的成本。裁決：TEMP 的 partition 骨架可留，selective transfer 必須反轉，DLWS cost model 必須重寫；而真正的勝負手是「CIM 容量是否足以讓 weight 常駐（model-stationary）」——這是唯一能讓 TEMP 在 DCIM 上落回「有效」的條件。**
