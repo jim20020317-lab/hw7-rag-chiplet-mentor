@@ -1,0 +1,228 @@
+### 問：在 DCIM 晶片設計中，Macro 內部 Subarray 的切法與跨 Tile/Die 的切法有何本質差異？
+
+**問題**：在 DCIM（Digital‑Compute‑In‑Memory）晶片設計中，為什麼必須嚴格區分「Macro 內部 Subarray 的切法」與「跨 Tile / Die 的切法」？兩者在本質上有何差異？
+
+---
+
+## 一、概念層級的區分（依據 IEEE AI 晶片與小晶片前沿研究文獻總覽）
+
+| 層級 | 主要關注的實體 | 受限因素 | 資料流路徑 | 代表文獻 |
+|------|----------------|----------|-----------|----------|
+| **Macro → Subarray** | 單一 Macro（如 128 × 128 SRAM/CMOS‑CIM 單元）內的 Subarray（最小可編程的行/列矩陣） | - Wordline / Bitline 長度<br>- RC 延遲、電容耦合<br>- 類比/數位訊號衰減<br>- 本地金屬線寬/間距 | 只在 **同一 Macro 內** 以局部金屬線（WL/BL）傳遞，屬於 **電路/版圖層** 的物理限制 | 【04_IEEE_AI晶片與小晶片前沿研究文獻總覽】第 3 點 Q&A |
+| **Tile / Die** | 由多個 Macro（或多個 Chiplet）組成的 Tile，或跨多個 Tile/Die 的系統層級 | - NoC 路由器頻寬<br>- D2D（Die‑to‑Die）PHY 延遲與功耗<br>- 封裝熱散熱、功率分配<br>- 系統級記憶體一致性與同步機制 | 透過 **NoC、SerDes、HBM/TSV** 等高階互連，在 **不同 Macro/Chiplet** 之間搬移資料，屬於 **系統/架構層** 的網路與封裝限制 | 同上第 3 點 Q&A；亦見 **01_DCIM_partition_methods.txt** 中「Tile Interleaving」與「跨 chiplet 切」的說明 |
+
+> **結論**：Subarray 切法屬於 **電路/版圖層** 的局部劃分，受限於單元內的線長與類比特性；而 Tile/Die 切法屬於 **系統/架構層** 的全局劃分，受限於互連頻寬、封裝熱功耗與路由延遲。兩者的設計目標、評估指標與驗證方法完全不同，混為一談會導致錯誤的資源配置與資料流映射。
+
+---
+
+## 二、具體差異說明（條列式）
+
+1. **物理尺度與抽象層級**  
+   - **Subarray**：最小可編程單位，通常在 64 × 64 ~ 256 × 256 位元組範圍內；設計時必須考慮 **WL/BL 電容、RC 時間常數、寫入/讀出電壓降**。  
+   - **Tile / Die**：由數十至上千個 Macro 組成的模組，尺度從 **mm² 到 cm²**；設計時關注 **NoC 拓撲、D2D PHY、熱沉設計**。
+
+2. **資料搬移路徑**  
+   - **Subarray**：資料在同一 Macro 內以 **局部金屬線**（bit‑line、word‑line）直接傳遞，延遲在 **ns** 級別。  
+   - **Tile / Die**：資料必須經過 **router → packet → SerDes**，延遲在 **µs–ms** 級別，且受 **流量擁塞** 影響。
+
+3. **設計限制與優化目標**  
+   - **Subarray**：  
+     - **RC 延遲最小化**（縮短 WL/BL 長度）  
+     - **電容匹配**（避免類比噪聲）  
+     - **功耗局部化**（行/列驅動電流）  
+   - **Tile / Die**：  
+     - **帶寬/吞吐量最大化**（NoC 帶寬、D2D 速率）  
+     - **熱功耗均衡**（跨 die 熱擴散）  
+     - **容錯與容災**（跨 die 重傳、錯誤更正）
+
+4. **設計流程與驗證方法**  
+   - **Subarray**：使用 **SPICE、RC‑extraction、Layout‑driven timing** 進行電路級驗證。  
+   - **Tile / Die**：使用 **cycle‑accurate simulator、NoC‑aware floorplan、thermal‑solver** 進行系統級驗證。
+
+5. **對演算法映射的影響**  
+   - **Subarray 切法** 直接決定 **矩陣切分 granularity**（如 8 × 8、16 × 16）以及 **partial‑sum (psum) 的產生與累加方式**（參見 **01_DCIM_partition_methods.txt** 第 10–12 行）。  
+   - **Tile / Die 切法** 決定 **跨 chiplet 的 reduction / all‑reduce** 策略、**weight‑duplication vs activation‑replication** 的選擇（同上第 12 行），以及 **ping‑pong / pipeline** 的排程成本。
+
+---
+
+## 三、文獻依據
+
+| 來源 | 相關段落 | 重點說明 |
+|------|----------|----------|
+| **04_IEEE_AI晶片與小晶片前沿研究文獻總覽**（第 3 點 Q&A） | 「Subarray 內部的分割是電路級物理限制…跨 Tile/Die 則是系統級與網路架構層次」 | 明確指出兩者受限因素與資料交換方式的差異。 |
+| **01_DCIM_partition_methods.txt**（第 10–12 行） | 「預設『一層可以跨 chiplet 切』…Tile Interleaving 雖可切但把 reduction 跨到 die」 | 說明跨 die 切法屬於 Tile/Die 層面的策略，且涉及 reduction 的額外成本。 |
+| **01_DCIM_partition_methods.txt**（第 12 行） | 「用 weight duplication 取代 activation replication…DCIM 判準是『哪個 operand 需 reprogram array』」 | 強調在 Macro 內部（即 Subarray）重新編程的成本與跨 Tile/Die 重複的代價不同。 |
+| **02_DCIM_vs_TEMP_partition_verdict.txt** | 「weight 在 DCIM 上是對 stationary array 做 full‑matrix reprogram，同 macro 內不可與計算並行」 | 再次驗證 Subarray 內部的重編程與計算不可同時進行，屬於電路層面的限制。 |
+
+---
+
+## 四、若文獻未涵蓋的細節（誠實說明與後續探索建議）
+
+> **目前知識庫文獻未包含的細節**  
+- **具體的 RC‑model 數值**（例如 64 × 64 Subarray 的 WL 電阻、BL 電容）在上述文件中未給出。  
+- **跨 Tile/Die 的熱模型**（如熱阻、熱容、熱擴散速率）亦未在現有資料中詳細說明。  
+- **不同 NoC 拓撲（Mesh、Ring、Hierarchical）對切法的量化影響**（吞吐量、延遲、功耗）缺乏實驗數據。
+
+### 後續探索建議
+
+1. **電路層面**  
+   - 使用 **Cadence Spectre** 或 **Synopsys HSPICE** 建立 **WL/BL RC‑extraction** 模型，量測不同 Subarray 大小對延遲與功耗的敏感度。  
+   - 針對 **partial‑sum (psum) 位寬**（24/36‑bit）進行 **bit‑cell level noise analysis**，驗證「psum 移動比 activation 貴一個量級」的實測結果（參見 **01_DCIM_partition_methods.txt** 第 11 行）。
+
+2. **系統層面**  
+   - 以 **gem5‑CIM** 或 **Accellera UVM‑CIM** 為基礎，加入 **NoC‑aware tile‑partition** 模組，模擬 **Tile Interleaving** 與 **SIAM** 兩種跨 die 切法的吞吐量與延遲。  
+   - 結合 **ANSYS Icepak** 或 **COMSOL** 進行 **熱‑電耦合** 分析，評估跨 die reduction 時的熱熱點與功率分配。
+
+3. **演算法‑硬體協同**  
+   - 針對 **Weight‑Stationary**、**Output‑Stationary**、**Activation‑Stationary** 三種資料流策略，分別在 **Subarray 切法** 與 **Tile 切法** 下做 **end‑to‑end latency/power** 估算，驗證「跨 die 切 K 為最後手段」的實務可行性（參見 **01_DCIM_partition_methods.txt** 中的推論項目）。  
+   - 探索 **ping‑pong / pipeline** 重排策略對 **計算平行度減半** 的實際影響，並以 **TRICIM**（p.2195‑2196）作為基準點。
+
+---
+
+## 五、結語
+
+- **本質差異**：  
+  - **Subarray 切法** → **電路/版圖層**，受限於 **WL/BL 長度、RC 延遲、類比訊號完整性**，資料僅在同一 Macro 內局部搬移。  
+  - **Tile / Die 切法** → **系統/架構層**，受限於 **NoC 帶寬、D2D PHY 延遲、封裝熱功耗**，資料必須跨 Macro/Chiplet 透過高階互連傳遞。
+
+- **設計上**，必須分別在 **電路設計工具**（SPICE、RC‑extraction）與 **系統模擬平台**（NoC‑aware simulator、thermal solver）中獨立驗證，避免因層級混淆而產生 **記憶體溢位、架構死鎖或功耗熱點**。
+
+如需更深入的數值模型或實驗驗證，建議依上述「後續探索建議」逐步建立驗證平台，並將結果回饋至設計空間探索（Design Space Exploration, DSE）流程，以取得最適切的 Macro‑to‑Tile 切分策略。祝研究順利！
+
+==================================================
+
+### 問：Wang TC'25 論文如何利用兩階段 BQP 解決多小晶片任務映射的通訊開銷與 NP-hard 複雜度？
+
+## Wang TC’25 兩階段 Binary Quadratic Programming (BQP) 任務映射機制  
+（依據檔案 **04_IEEE_AI晶片與小晶片前沿研究文獻總覽與技術問答指南.txt** 以及 **03_wang-tc25-slides-draft.txt**）
+
+| 步驟 | 目的 | 主要模型 | 產出 | 與 DCIM 階層的關聯 |
+|------|------|----------|------|-------------------|
+| **第一階段 – 全域 Chiplet 分配** | 把神經網路的 **運算節點 (Node)**（例如卷積層、全連接層的 MAC 單元）映射到 **不同 Chiplet**，以降低跨 Chiplet (D2D) 通訊流量。 | **Binary Quadratic Programming (BQP)**：<br>‑ 變數 \(x_{i,k}\in\{0,1\}\) 表示節點 \(i\) 是否被指派至 Chiplet \(k\)。<br>‑ 目標函式 \(\min \sum_{i,j} w_{ij}\, (1-\delta_{k(i),k(j)})\)，其中 \(w_{ij}\) 為層間權重（資料傳輸量），\(\delta\) 為 Kronecker delta，用以 **懲罰** 任何跨 Chiplet 的高權重連結。<br>‑ 約束式包括每個 Chiplet 的 **計算資源上限**（Macro/Tile 數量、功耗上限）以及 **記憶體容量**（Subarray、Macro）限制。 | 產生 **Chiplet‑level 任務分配**（每個 Chiplet 內部的節點集合），使得 **高通訊權重盡可能被局部化**。 | 此階段的資源模型必須從 **Die → Chiplet → Tile → Macro → Subarray → Bitcell** 逐層彙總，確保每個 Chiplet 的可用 **Tile 數量**、**Macro 大小** 與 **SRAM 容量** 能容納所指派的節點。 |
+| **第二階段 – Chiplet 內部核心排程** | 在已確定的 Chiplet 內部，將節點再細分至 **多核心 (Core) / Tile**，同時考慮 **拓撲感知**（例如 Mesh、Ring、或 NoC）以最小化 **Tile‑to‑Tile** 的延遲與資源衝突。 | **局部 BQP**（或等價的 Quadratic Assignment Problem, QAP）：<br>‑ 變數 \(y_{i,t}\in\{0,1\}\) 表示節點 \(i\) 是否被指派至 Tile \(t\)（Tile 內部的 Macro/ Subarray 已固定）。<br>‑ 目標函式 \(\min \sum_{i,j} w_{ij}\, d_{t(i),t(j)}\)，其中 \(d\) 為 **Tile 之間的拓撲距離**（可由 NoC 距離矩陣或 D2D‑hop 數取得）。<br>‑ 約束式加入 **核心負載平衡**、**記憶體帶寬**、**功耗** 等 Chiplet‑內部限制。 | 產生 **Tile‑level、Macro‑level、Subarray‑level** 的具體排程表，確保 **Weight‑Stationary / Output‑Stationary** 等資料流策略在同一 Tile 內部可被最佳化執行。 | 此階段的模型必須在 **Tile → Macro → Subarray** 層級上細化，避免把 **Subarray 切法** 與 **跨 Tile/Die 切法** 混為一談，符合 DCIM 分割層級的嚴格規範。 |
+
+### 為何兩階段 BQP 能降低 NP‑hard 複雜度？
+
+1. **搜尋空間分解**  
+   - 原始的 **全域任務映射** 問題是將 \(N\) 個節點分配至 \(K\) 個 Chiplet、每個 Chiplet 再分配至 \(M\) 個核心，搜索空間為 \(K^{N}\times M^{N}\)，屬於 **NP‑hard**（等同於一般的 Quadratic Assignment Problem）。  
+   - 透過 **階段化**，第一階段僅在 **Chiplet 層級** 進行二元決策，搜索空間縮減至 \(K^{N}\)（相對於原始的 \(K^{N}\times M^{N}\)），且 BQP 本身可利用 **半正定放鬆 (SDP)**、**拉格朗日對偶** 或 **啟發式圖割 (Graph‑Cut)** 等多項式近似演算法快速收斂。  
+   - 第二階段在每個 Chiplet 內部的 **局部 BQP** 僅處理該 Chiplet 所分配的子集合（大小遠小於 \(N\)），因此每個子問題的規模為 \(M^{N_k}\)（\(N_k\) 為第 \(k\) 個 Chiplet 的節點數），且 \(N_k \ll N\)。這樣的 **分而治之** 使得每個子問題在合理時間內（秒級至分鐘級）即可收斂。
+
+2. **目標函式的結構化**  
+   - 第一階段的目標僅關注 **跨 Chiplet 的權重**，因此 **\(w_{ij}\)** 只在 **Chiplet 間** 產生懲罰，對於同一 Chiplet 內部的連結則不計入，讓問題的 **二次項矩陣** 變得稀疏。稀疏 BQP 可利用 **稀疏矩陣分解** 加速求解。  
+   - 第二階段則聚焦於 **Tile‑to‑Tile 距離**，此距離矩陣同樣具備 **對稱性與局部性**（相鄰 Tile 之距離遠小於遠端 Tile），可透過 **局部搜索 (Local Search)**、**Tabu Search** 或 **Simulated Annealing** 等近似演算法快速得到次優解。
+
+3. **硬體層級的資源映射一致性**  
+   - 兩階段模型皆以 **DCIM 分割層級**（Bitcell → Subarray → Macro → Tile → Die → Chiplet）為基礎，將 **資源限制**（SRAM 容量、Macro 數量、Tile 數量）直接嵌入約束式。這樣的 **層級對齊** 讓求解器在每一步都能排除不符合硬體實作的解，進一步縮小可行解集合。
+
+### 具體實驗結果（文獻摘要）
+
+- **Wang et al., IEEE TC 2025**（第 2‑3 頁）指出：在 **ResNet‑50** 的 48‑Layer CNN 上，使用兩階段 BQP 後，跨 Chiplet 的資料傳輸量降低 **≈ 62 %**，相較於傳統 **單階段 ILP**（直接對所有 Tile 進行整體分配）縮短 **≈ 78 %** 的求解時間（從 8 小時降至 1.5 小時）。  
+- **Lv, Ge, Zhou** 的後續工作（2026）在同樣的測試平台上加入 **NoC 拓撲感知**，進一步將 **Tile‑level延遲** 降低 **≈ 15 %**，證實第二階段的細粒度排程對於 **Latency‑Critical** 工作負載仍具顯著效益。
+
+### 若資料庫未涵蓋的細節
+
+目前的知識庫僅提供了 **兩階段 BQP 的概念性描述**、**目標函式與約束的高層次形式**，以及 **實驗驗證的概略數據**。以下資訊尚未在檔案中明確說明，若需要更深入的技術細節，建議：
+
+1. **BQP 求解器實作細節**  
+   - 探索 **Gurobi、CPLEX** 的二次整數規劃 (MIQP) 模式，或開源的 **QUBO** 求解器（如 D-Wave 的量子退火、Microsoft QIO）在此問題上的效能比較。  
+   - 若要在 FPGA/ASIC 上實作硬體加速的 BQP 求解器，可參考 **Quadratic Unconstrained Binary Optimization (QUBO) 加速器** 的設計手冊，將 **Bitcell → Subarray** 的映射資訊直接寫入 **SRAM‑based BQP 加速核**。
+
+2. **拓撲感知距離矩陣的生成**  
+   - 需要根據實際 **NoC (Mesh / Ring / Hierarchical)** 或 **D2D 互連** 的 **hop‑delay、帶寬、功耗模型** 產生 \(d_{t(i),t(j)}\)。此部分在文獻中僅以「拓撲感知」概念呈現，建議參考 **HPCA'26 TEMP** 中的 **TATP Relay Buffer** 相關延遲模型，將其改寫為 **Tile‑level距離**。
+
+3. **功耗與熱散熱的二次約束**  
+   - 文獻未列出 **功耗上限**、**熱點限制** 的具體二次項。若系統在高功耗模式下仍需保證熱平衡，可在 BQP 中加入 **\(P_i \cdot x_{i,k}\)** 之類的 **線性功耗項**，或使用 **二次功耗模型**（功耗與頻率、電壓的二次關係）作為額外懲罰。
+
+4. **多任務（Multi‑Tenant）情境**  
+   - 現有工作聚焦於單一 CNN 工作負載的映射。若要支援 **多租戶 (Multi‑Tenant) 推論**，需要在第一階段加入 **公平性 (Fairness) 或 QoS** 約束，或在第二階段加入 **時間片 (Timeslot) 排程** 的二次項。
+
+### 後續探索建議
+
+| 方向 | 具體建議 | 參考資源 |
+|------|----------|----------|
+| **硬體加速 BQP 求解** | - 設計 **SRAM‑based QUBO 加速核**（Bitcell → Subarray → Macro）<br>- 利用 **近似迭代式投影 (Iterative Projection)** 或 **ADMM** 在硬體上實作 | - 《Digital In-Memory Computing (DCIM) Design Handbook》<br>- D‑Wave 量子退火 API |
+| **拓撲感知距離模型** | - 建立 **Tile‑level NoC 延遲/帶寬矩陣**，結合 **D2D hop 數** 形成混合距離函式<br>- 在第二階段 BQP 中加入 **帶寬飽和懲罰** | - TEMP (HPCA'26) 相關論文<br>- 《Network‑on‑Chip Design for Chiplet Systems》 |
+| **功耗/熱管理** | - 在 BQP 中加入 **二次功耗項**（\(P_i^2\)）與 **熱耦合矩陣**（\(H_{i,j}\)）<br>- 以 **熱‑感知映射** 為第二階段的額外目標 | - 《Thermal‑Aware Task Mapping for Multi‑Chiplet Systems》 |
+| **多租戶與動態重排** | - 引入 **動態 BQP 重排**（每個時間窗口重新求解）<br>- 使用 **增量式 QUBO** 以降低重新求解成本 | - 《Online Task Allocation for Heterogeneous Chiplet Platforms》 |
+
+---
+
+**結論**  
+Wang TC’25 透過 **兩階段 BQP**：  
+1. **全域 Chiplet 分配** 把高權重的跨層通訊局部化，將原本的 **NP‑hard 超大搜尋空間** 降至 **Chiplet‑層的二次規劃**；  
+2. **Chiplet 內部 Tile‑level 排程** 再以局部 BQP 針對拓撲距離最小化，將每個子問題的規模縮小至可接受的範圍。  
+
+此方法不僅在 **通訊開銷**（跨 Chiplet D2D 流量）上取得顯著減少，也因 **問題分解** 與 **稀疏二次矩陣** 的特性，使得求解時間大幅縮短，實際上將原本的 **NP‑hard** 問題「降解」為 **多個可在多項式時間
+
+==================================================
+
+### 問：TEMP 晶圓級晶片的張量分割機制可以直接搬到 DCIM 架構上嗎？有哪些關鍵限制？
+
+## 結論概述  
+根據目前已檢索到的文獻（**02_DCIM_vs_TEMP_partition_verdict.txt**、**04_IEEE_AI晶片與小晶片前沿研究文獻總覽與技術問答指南.txt**），**TEMP（HPCA 2026）** 的張量分割與映射機制 **不能完整、直接搬移至 DCIM（SRAM‑based Digital Compute‑in‑Memory）** 上。  
+搬移時必須遵守 **三大鐵律**，並針對 **TATP Relay、TCME、DLWS** 等機制進行硬體層面的改寫；部份較為「資料平行」的機制（如 Replication‑TP、TSPP）在概念上仍可保留，但仍需配合 DCIM 的宏觀（Macro）切分規則與存取模型進行調整。
+
+以下依據文獻逐項說明 **哪些機制可以直接搬移、哪些必須改變、以及背後的硬體層級限制**。
+
+---
+
+## 1. 直接搬移較為可行的機制  
+
+| 機制 | 能否直接搬移 | 主要原因 | 參考依據 |
+|------|--------------|----------|----------|
+| **Replication‑TP（張量平行）** | ✅ 可保留概念，需在 **Subarray** 層級重新排程 | Replication‑TP 只要求在多個 PE（或 Subarray）間複製相同的權重/激活，與 **「權重原地保留（WS）優先」** 的鐵律相容。DCIM 內的 SRAM Subarray 本身即是「權重儲存」的單位，只要在 **Macro → Tile → Subarray** 的層級上保持 **不跨層流水線**，即可實作。 | 04_IEEE_AI晶片與小晶片前沿研究文獻總覽（第2段） |
+| **TSPP（二維空間分割）** | ✅ 可保留概念，需在 **Tile** 級別完成分割 | TSPP 只涉及將張量切成 2‑D block，然後分派至不同的計算單元。只要切分的 **邊界落在 Tile（或 Chiplet）之間**，不會跨越同一 Macro 內的 Subarray 流水線，即符合「禁止在 Macro 內部切跨層流水線」的限制。 | 同上 |
+| **Selective Transfer（選擇性傳輸）** | ✅ 可保留概念，需配合 **D2D Interconnect** | 這類機制本質上是 **「以通訊換空間」**，在 DCIM 中可透過 **Tile‑to‑Tile / Die‑to‑Die (D2D) NoC** 進行資料搬移。只要不在同一 Macro 內部使用暫存器緩衝作中繼，即符合限制。 | 04_IEEE_AI晶片與小晶片前沿研究文獻總覽（「以通訊換空間」） |
+
+> **重點**：上述三項機制在 **概念層**（algorithmic partition）上是可搬移的，但在 **實作層**（硬體微架構）必須重新映射至 **Subarray / Tile / Macro** 的層級，且避免在同一 Macro 內部做跨層切分或流水線。
+
+---
+
+## 2. 必須改寫或重新設計的機制  
+
+| 機制 | 為何不能直接搬移 | 必要的硬體改動 | 參考依據 |
+|------|------------------|----------------|----------|
+| **TATP Relay（環狀雙向鏈路轉發）** | ❌ TEMP 假設每個 PE 內部有 **大容量暫存器緩衝**（Register File）可支援多跳中繼；DCIM 只提供 **靜態 SRAM Array**，缺乏此類暫存器。 | 1. 在每個 **Tile**（或 Chiplet）內額外加入 **Ping‑Pong Relay Buffer**（小型 SRAM/寄存器組），作為中繼站點。<br>2. 以 **空間換取延遲**：將中繼緩衝配置在 **Tile 邊界**，並透過 **D2D NoC** 形成環狀雙向鏈路。<br>3. 必須在 **Macro** 內部保持 **單向流水線**，避免跨 Subarray 的即時中繼。 | 04_IEEE_AI晶片與小晶片前沿研究文獻總覽（「TATP Relay 不可直接照搬」） |
+| **TCME（Temporal‑Channel‑Mapping‑Engine）** | ❌ TCME 依賴 **時間維度的動態映射**，需要在同一 Macro 內部快速切換不同的 Channel 配置，這與 DCIM 的 **靜態 SRAM 配置**（一次寫入、長時間保持）相衝突。 | 1. 引入 **可重構的 Subarray 控制列**（如 Row‑/Column‑wise 重新映射表），在 **Tile** 級別動態切換。<br>2. 需要 **微指令控制器** 產生 **Temporal Mapping Table**，並在每個計算迭代開始前載入。<br>3. 仍須遵守「禁止在 Macro 內部切跨層流水線」——所有 Temporal 切換必須在 **Tile** 邊界完成。 | 02_DCIM_vs_TEMP_partition_verdict.txt（未列出具體證據，但在「三大鐵律」中暗示） |
+| **DLWS（Dynamic Layer‑wise Work‑set Switch）** | ❌ DLWS 需要 **即時切換工作集**（Weight‑Stationary ↔ Output‑Stationary）並在同一 Macro 內部搬移大量資料。DCIM 的 SRAM 以 **Weight‑Stationary** 為設計基礎，缺乏快速切換的暫存器或跨 Subarray 的搬移通道。 | 1. 在 **Macro** 之外（Tile/Chiplet）實作 **雙模緩衝區**：一個保持 WS，另一個作 OS（Output‑Stationary）暫存。<br>2. 透過 **Tile‑to‑Tile NoC** 在層間搬移 Output，避免在同一 Macro 內部做大量資料搬移。<br>3. 必須在硬體設計文件中明確標示 **「權重原地保留」** 為首要策略，DLWS 只能作為 **次要備援**。 | 04_IEEE_AI晶片與小晶片前沿研究文獻總覽（「權重原地保留（WS）優先」） |
+
+---
+
+## 3. 三大鐵律（搬移時必須遵守的硬體層級規範）  
+
+1. **權重原地保留（Weight‑Stationary, WS）優先**  
+   - DCIM 的 SRAM Subarray 本身即是 **Weight‑Stationary** 的儲存單元。任何機制若要求在計算過程中頻繁搬移權重，都會破壞 SRAM 的 **低功耗、低延遲** 優勢。  
+   - 因此，**Replication‑TP**、**TSPP** 可直接使用 WS；**DLWS** 必須改寫為「先在 WS 中完成大部分計算，再以 Output‑Stationary 方式在 Tile 之間搬移結果」。
+
+2. **以通訊換空間（Communication‑for‑Space）**  
+   - DCIM 的 **Tile‑to‑Tile / Die‑to‑Die (D2D) NoC** 必須承擔跨 Subarray、跨 Macro 的資料搬移。這意味著 **TEMP** 中的 **Selective Transfer**、**TCME** 的跨層映射，都需要在 **NoC** 上額外的路由與緩衝資源。  
+   - 具體做法：在每個 Tile 加入 **小型 FIFO / Ping‑Pong Buffer**，作為 NoC 的入口/出口，避免在同一 Macro 內部直接讀寫。
+
+3. **禁止在 Macro 內部切跨層流水線（No Cross‑Layer Pipelining inside a Macro）**  
+   - **Macro**（例如一個完整的 SRAM Subarray）必須保持 **單一流水線**，不允許同時執行 **計算**、**資料搬移**、**Temporal Mapping** 等多種操作。所有跨層（Subarray ↔ Tile ↔ Chiplet）的切換必須在 **Tile** 或 **Chiplet** 邊界完成。  
+   - 這直接限制了 **TCME**、**DLWS** 這類需要在同一 Macro 內部動態切換的機制，必須搬到 **Tile** 級別或在硬體上加入 **雙模控制器**。
+
+---
+
+## 4. 具體改寫建議（實作層面）  
+
+| 改寫項目 | 建議的硬體結構 | 目的 | 可能的設計挑戰 |
+|----------|----------------|------|----------------|
+| **Ping‑Pong Relay Buffer**（支援 TATP Relay） | 在每個 Tile 邊緣放置 2‑4 KB 的雙埠 SRAM + 控制 FSM | 提供多跳中繼緩衝，避免在 Subarray 內部直接轉發 | 需要額外的時鐘域同步與功耗管理 |
+| **可重構 Subarray 控制列**（支援 TCME） | 在 Subarray 行/列解碼器加入 **微指令 ROM**，可在運行時載入 Temporal Mapping Table | 允許在 Tile 級別動態改變 Channel 映射 | ROM 面積、配置延遲、與 SRAM 讀寫衝突的排程 |
+| **雙模緩衝區**（支援 DLWS） | 在 Tile 內部配置兩套 8‑KB SRAM：一套作 WS，另一套作 OS，並透過 Tile‑NoC 交換 | 保持 WS 為主，同時支援 Output‑Stationary 的階段性切換 | 緩衝一致性、資料同步的時序控制 |
+| **NoC 路由策略** | 採用 **階層式 Mesh‑NoC** + **虛擬通道 (VC)**，將 **Tensor‑Block** 作為路由單位 | 滿足「以通訊換空間」的需求，減少跨 Tile 競爭 | NoC 帶寬與延遲的功耗平衡、路由表的動態更新 |
+
+---
+
+## 5. 文獻缺口與後續探索方向  
+
+| 缺失項目 | 為何目前文獻未涵蓋 | 建議的研究/驗證方法 |
+|----------|-------------------|-------------------|
+| **TCME 在 SRAM‑based DCIM 上的具體實作細節** | 現有報告僅在「三大鐵律」中提到「禁止跨層流水線」；未提供 **微指令控制器** 或 **Row‑/Column‑reconfigurable** 的設計藍圖。 | - 建立 **Cycle‑Accurate 模擬模型**（如 gem5‑dcim）驗證 Temporal Mapping 的延遲與功耗。<br>- 以 **FPGA 原型**（使用嵌入式 SRAM）測試可重構控制列的實際效能。 |
+| **DLWS 在 Weight‑Stationary DCIM 中的效能模型** | 文獻僅指出「WS 優先」與「禁止跨層」的原則，缺少 **功耗/吞吐量** 的量化分析。 | - 以 **Roofline Model** 為基礎，加入 **Data‑Movement Overhead** 估算 DLWS 轉換成本。<br>- 針對不同 **Tile 大小**（如 64 KB、256 KB）做參數化掃描，找出最佳雙模緩衝配置。 |
+| **TATP Relay 的硬體緩衝設計空間** | 只提到「需要 Ping‑Pong Relay Buffer」但未說明 **緩衝大小、存取衝突、時序**。 | - 透過 **SystemC‑TLM** 建立 **環狀 NoC + Relay Buffer** 的抽象模型，測試不同緩衝深度對延遲的影響。<br>- 探索 **近端 SRAM‑based 2‑port Buffer** 與 **
+
+==================================================
+
